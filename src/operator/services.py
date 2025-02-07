@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List
 from kubernetes.client.rest import ApiException
 import kopf
+from kubernetes import client as k8s_client
 
 from .config import settings
 from .utils import (
@@ -68,7 +69,94 @@ def validate_project_quota(namespace: str, spec: Dict[str, Any]) -> bool:
     Returns:
         bool: 是否满足配额要求
     """
-    return check_project_quota(namespace, spec)
+    try:
+        # 获取namespace的资源配额
+        quota = k8s_client.CoreV1Api().read_namespaced_resource_quota(
+            name=f"{namespace}-quota",
+            namespace=namespace
+        )
+        
+        if not quota or not quota.status:
+            logger.warning(f"No resource quota found for namespace {namespace}")
+            return False
+            
+        # 解析当前使用量和限制
+        used = quota.status.used or {}
+        hard = quota.status.hard or {}
+        
+        # 从spec中获取资源请求
+        training = spec.get("training", {}).get("spec", {})
+        if not training:
+            return False
+            
+        resources = training.get("template", {}).get("spec", {}).get("containers", [{}])[0].get("resources", {})
+        requests = resources.get("requests", {})
+        
+        # 检查CPU
+        cpu_request = _parse_cpu(requests.get("cpu", "0"))
+        cpu_used = _parse_cpu(used.get("requests.cpu", "0"))
+        cpu_limit = _parse_cpu(hard.get("limits.cpu", "0"))
+        if cpu_request + cpu_used > cpu_limit:
+            logger.warning(f"CPU quota exceeded: {cpu_request + cpu_used} > {cpu_limit}")
+            return False
+            
+        # 检查内存
+        memory_request = _parse_memory(requests.get("memory", "0"))
+        memory_used = _parse_memory(used.get("requests.memory", "0"))
+        memory_limit = _parse_memory(hard.get("limits.memory", "0"))
+        if memory_request + memory_used > memory_limit:
+            logger.warning(f"Memory quota exceeded: {memory_request + memory_used} > {memory_limit}")
+            return False
+            
+        # 检查GPU
+        gpu_request = int(requests.get("nvidia.com/gpu", 0))
+        gpu_used = int(used.get("requests.nvidia.com/gpu", 0))
+        gpu_limit = int(hard.get("limits.nvidia.com/gpu", 0))
+        if gpu_request + gpu_used > gpu_limit:
+            logger.warning(f"GPU quota exceeded: {gpu_request + gpu_used} > {gpu_limit}")
+            return False
+            
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to validate project quota: {str(e)}")
+        return False
+
+def _parse_memory(memory_str: str) -> int:
+    """解析内存字符串为字节数"""
+    try:
+        if isinstance(memory_str, (int, float)):
+            return int(memory_str)
+            
+        if not memory_str:
+            return 0
+            
+        memory_str = str(memory_str).strip().lower()
+        
+        # 转换为字节
+        multipliers = {
+            'k': 1024,
+            'm': 1024 * 1024,
+            'g': 1024 * 1024 * 1024,
+            't': 1024 * 1024 * 1024 * 1024,
+            'ki': 1024,
+            'mi': 1024 * 1024,
+            'gi': 1024 * 1024 * 1024,
+            'ti': 1024 * 1024 * 1024 * 1024
+        }
+        
+        number = float(''.join([c for c in memory_str if c.isdigit() or c == '.']))
+        unit = ''.join([c for c in memory_str if not c.isdigit() and c != '.'])
+        
+        if not unit:
+            return int(number)
+            
+        if unit not in multipliers:
+            return 0
+            
+        return int(number * multipliers[unit])
+    except:
+        return 0
 
 def create_training_job_resource(name: str, namespace: str, spec: Dict[str, Any]):
     """创建training-operator Job资源

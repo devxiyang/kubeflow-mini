@@ -39,7 +39,11 @@ def create_mljob(spec: Dict[str, Any], meta: Dict[str, Any], **kwargs):
     """
     try:
         name = meta.get("name")
-        namespace = meta.get("namespace", "default")
+        project = spec.get("project")
+        if not project:
+            raise kopf.PermanentError("Project name is required")
+            
+        namespace = project  # 使用项目名称作为namespace
         logger.info(f"Creating MLJob {namespace}/{name}")
 
         # 验证和检查
@@ -92,7 +96,11 @@ def update_mljob(spec: Dict[str, Any], meta: Dict[str, Any],
     """
     try:
         name = meta.get("name")
-        namespace = meta.get("namespace", "default")
+        project = spec.get("project")
+        if not project:
+            raise kopf.PermanentError("Project name is required")
+            
+        namespace = project  # 使用项目名称作为namespace
         logger.info(f"Updating MLJob {namespace}/{name}")
 
         # 验证和检查
@@ -142,7 +150,11 @@ def delete_mljob(spec: Dict[str, Any], meta: Dict[str, Any], **kwargs):
     """
     try:
         name = meta.get("name")
-        namespace = meta.get("namespace", "default")
+        project = spec.get("project")
+        if not project:
+            raise kopf.PermanentError("Project name is required")
+            
+        namespace = project  # 使用项目名称作为namespace
         logger.info(f"Deleting MLJob {namespace}/{name}")
 
         # 删除Training Job
@@ -182,7 +194,11 @@ def reconcile_mljob(spec: Dict[str, Any], meta: Dict[str, Any], status: Dict[str
     """
     try:
         name = meta.get("name")
-        namespace = meta.get("namespace", "default")
+        project = spec.get("project")
+        if not project:
+            raise kopf.PermanentError("Project name is required")
+            
+        namespace = project  # 使用项目名称作为namespace
         logger.debug(f"Reconciling MLJob {namespace}/{name}")
 
         # 检查资源年龄
@@ -201,47 +217,38 @@ def reconcile_mljob(spec: Dict[str, Any], meta: Dict[str, Any], status: Dict[str
         # 获取Training Job状态
         training_status = services.get_training_job_status(name, namespace, spec)
         if not training_status:
-            # 检查错误次数
-            error_count = status.get("reconcile_errors", 0)
-            if error_count >= settings.RECONCILE.error_threshold:
-                return services.create_mljob_status(
-                    settings.JOB_PHASES["ERROR"],
-                    "Failed to get training job status after multiple attempts",
-                    reason="ReconcileError",
-                    reconcile_errors=error_count + 1
-                )
+            # Training Job不存在,需要重建
+            services.create_training_job_resource(name, namespace, spec)
             return services.create_mljob_status(
-                settings.JOB_PHASES["UNKNOWN"],
-                "Training job status not available",
-                reconcile_errors=error_count + 1
+                settings.JOB_PHASES["CREATED"],
+                "Recreated training job",
+                generation=meta.get("generation", 1),
+                start_time=True
             )
-
-        # 更新状态
-        phase = training_status.get("phase", settings.JOB_PHASES["RUNNING"])
-        status = services.create_mljob_status(
-            phase,
-            f"Training job is {phase.lower()}",
-            generation=meta.get("generation", 1),
-            training_status=training_status,
-            reconcile_errors=0  # 重置错误计数
-        )
-        
-        # 如果完成则添加完成时间
-        if phase in [settings.JOB_PHASES["SUCCEEDED"], settings.JOB_PHASES["FAILED"]]:
-            status["completion_time"] = datetime.utcnow().isoformat() + "Z"
             
-        return status
+        # 返回当前状态
+        return services.create_mljob_status(
+            training_status.get("phase", settings.JOB_PHASES["RUNNING"]),
+            training_status.get("message", "Running"),
+            generation=meta.get("generation", 1),
+            training_status=training_status
+        )
 
-    except kopf.TemporaryError:
-        raise
+    except kopf.PermanentError as e:
+        logger.error(f"Permanent error reconciling MLJob {namespace}/{name}: {str(e)}")
+        return services.create_mljob_status(
+            settings.JOB_PHASES["FAILED"],
+            str(e),
+            generation=meta.get("generation", 1),
+            reason="ReconcileError"
+        )
     except Exception as e:
         logger.exception(f"Unexpected error reconciling MLJob {namespace}/{name}")
-        error_count = status.get("reconcile_errors", 0)
         return services.create_mljob_status(
-            settings.JOB_PHASES["ERROR"],
-            f"Reconciliation failed: {str(e)}",
-            reason="ReconcileError",
-            reconcile_errors=error_count + 1
+            settings.JOB_PHASES["FAILED"],
+            f"Unexpected error: {str(e)}",
+            generation=meta.get("generation", 1),
+            reason="InternalError"
         )
 
 @kopf.timer(settings.GROUP, settings.VERSION, settings.PLURAL,
@@ -280,7 +287,11 @@ def resume_mljob(spec: Dict[str, Any], meta: Dict[str, Any], status: Dict[str, A
     """处理operator重启后的MLJob恢复"""
     try:
         name = meta.get("name")
-        namespace = meta.get("namespace", "default")
+        project = spec.get("project")
+        if not project:
+            raise kopf.PermanentError("Project name is required")
+            
+        namespace = project  # 使用项目名称作为namespace
         logger.info(f"Resuming MLJob {namespace}/{name}")
         
         # 检查Training Job是否存在
@@ -304,10 +315,19 @@ def resume_mljob(spec: Dict[str, Any], meta: Dict[str, Any], status: Dict[str, A
             training_status=training_status
         )
         
+    except kopf.PermanentError as e:
+        logger.error(f"Permanent error resuming MLJob {namespace}/{name}: {str(e)}")
+        return services.create_mljob_status(
+            settings.JOB_PHASES["FAILED"],
+            str(e),
+            generation=meta.get("generation", 1),
+            reason="ResumeError"
+        )
     except Exception as e:
         logger.exception(f"Failed to resume MLJob {namespace}/{name}")
         return services.create_mljob_status(
-            settings.JOB_PHASES["ERROR"],
+            settings.JOB_PHASES["FAILED"],
             f"Failed to resume job: {str(e)}",
-            reason="ResumeError"
+            generation=meta.get("generation", 1),
+            reason="InternalError"
         ) 
