@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: manifests/deployment/frontend/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_BASE=http://localhost:8000/api/v1
+    depends_on:
+      - backend
+
+  backend:
+    build:
+      context: .
+      dockerfile: manifests/deployment/backend/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:///data/kubeflow_mini.db
+      - SECRET_KEY=your-secret-key
+    volumes:
+      - ./data:/data
+
+  operator:
+    build:
+      context: .
+      dockerfile: manifests/deployment/operator/Dockerfile
+    environment:
+      - KUBERNETES_SERVICE_HOST=host.docker.internal
+      - KUBERNETES_SERVICE_PORT=6443
+      - KUBECONFIG=/root/.kube/config
+    volumes:
+      - ~/.kube/config:/root/.kube/config:ro 
