@@ -14,28 +14,49 @@ spec:
     - name: v1
       served: true
       storage: true
+      additionalPrinterColumns:
+        - name: Status
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}
       schema:
         openAPIV3Schema:
           type: object
           properties:
             spec:
               type: object
-              required: ["image"]
+              required: ["training"]
               properties:
-                type:
+                training:
+                  type: object
+                  description: "training-operator的任务配置"
+                  x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              properties:
+                phase:
                   type: string
-                  enum: ["pytorch"]
-                  default: "pytorch"
-                frameworkVersion:
-                  type: string
-                  default: "1.13.1"
-                workerReplicas:
-                  type: integer
-                  minimum: 1
-                  default: 1
-                image:
-                  type: string
-                command:
+                  description: "任务状态"
+                  enum: ["Created", "Running", "Failed", "Succeeded", "Deleted"]
+                conditions:
                   type: array
                   items:
-                    type: string 
+                    type: object
+                    required: ["type", "status", "lastTransitionTime", "reason"]
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string 
