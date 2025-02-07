@@ -12,6 +12,12 @@ from .models import User, Project, MLJob, Notebook
 from .schemas import UserCreate, ProjectCreate, MLJobCreate, NotebookCreate, NotebookUpdate
 from .security import get_password_hash
 from .config import settings
+from .k8s import (
+    create_mljob_resource, update_mljob_resource,
+    delete_mljob_resource, get_mljob_status,
+    create_notebook_resources, update_notebook_resources,
+    delete_notebook_resources, get_notebook_endpoint
+)
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -24,88 +30,6 @@ except:
 
 # Kubernetes API客户端
 k8s_api = client.CustomObjectsApi()
-
-def update_k8s_mljob(name: str, namespace: str, spec: dict) -> dict:
-    """在Kubernetes中更新MLJob资源
-    
-    Args:
-        name: 资源名称
-        namespace: 命名空间
-        spec: 新的MLJob规格
-        
-    Returns:
-        dict: 更新后的资源对象
-    """
-    try:
-        body = {
-            "apiVersion": f"{settings.K8S_GROUP}/{settings.K8S_VERSION}",
-            "kind": "MLJob",
-            "metadata": {
-                "name": name,
-                "namespace": namespace
-            },
-            "spec": spec
-        }
-        
-        return k8s_api.patch_namespaced_custom_object(
-            group=settings.K8S_GROUP,
-            version=settings.K8S_VERSION,
-            namespace=namespace,
-            plural=settings.K8S_PLURAL,
-            name=name,
-            body=body
-        )
-    except ApiException as e:
-        logger.error(f"Failed to update MLJob in Kubernetes: {str(e)}")
-        raise
-
-def create_k8s_project(name: str, namespace: str, spec: dict) -> dict:
-    """在Kubernetes中创建Project资源"""
-    try:
-        body = {
-            "apiVersion": f"{settings.K8S_GROUP}/{settings.K8S_VERSION}",
-            "kind": "Project",
-            "metadata": {
-                "name": name,
-                "namespace": namespace
-            },
-            "spec": spec
-        }
-        
-        return k8s_api.create_namespaced_custom_object(
-            group=settings.K8S_GROUP,
-            version=settings.K8S_VERSION,
-            namespace=namespace,
-            plural="projects",
-            body=body
-        )
-    except ApiException as e:
-        logger.error(f"Failed to create Project in Kubernetes: {str(e)}")
-        raise
-
-def create_k8s_owner(name: str, namespace: str, spec: dict) -> dict:
-    """在Kubernetes中创建Owner资源"""
-    try:
-        body = {
-            "apiVersion": f"{settings.K8S_GROUP}/{settings.K8S_VERSION}",
-            "kind": "Owner",
-            "metadata": {
-                "name": name,
-                "namespace": namespace
-            },
-            "spec": spec
-        }
-        
-        return k8s_api.create_namespaced_custom_object(
-            group=settings.K8S_GROUP,
-            version=settings.K8S_VERSION,
-            namespace=namespace,
-            plural="owners",
-            body=body
-        )
-    except ApiException as e:
-        logger.error(f"Failed to create Owner in Kubernetes: {str(e)}")
-        raise
 
 # User operations
 @db_session
@@ -277,7 +201,7 @@ def create_mljob(mljob: MLJobCreate, user_id: int) -> MLJob:
                 "training": mljob.training_spec  # 直接使用传入的training配置
             }
             
-            create_k8s_mljob(
+            create_mljob_resource(
                 name=db_mljob.name,
                 namespace=db_mljob.namespace,
                 job_id=db_mljob.job_id,
@@ -322,7 +246,7 @@ def update_mljob(job_id: str, mljob: MLJobCreate) -> MLJob:
             "training": mljob.training_spec  # 直接使用传入的training配置
         }
         
-        update_k8s_mljob(db_job.name, db_job.namespace, k8s_spec)
+        update_mljob_resource(db_job.name, db_job.namespace, k8s_spec)
         return db_job
         
     except HTTPException:
@@ -346,7 +270,7 @@ def delete_mljob(job_id: str):
             raise HTTPException(status_code=404, detail="MLJob not found")
             
         # 2. 删除Kubernetes资源
-        delete_k8s_mljob(db_job.name, db_job.namespace)
+        delete_mljob_resource(db_job.name, db_job.namespace)
         
         # 3. 删除数据库记录
         db_job.delete()

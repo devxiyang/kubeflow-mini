@@ -183,4 +183,90 @@ def get_notebook_endpoint(name: str, namespace: str) -> str:
             
     except ApiException as e:
         logger.error(f"Failed to get notebook endpoint: {str(e)}")
-        return "" 
+        return ""
+
+def create_mljob_resource(name: str, namespace: str, job_id: str, spec: Dict[str, Any]):
+    """创建MLJob资源"""
+    try:
+        body = {
+            "apiVersion": f"{settings.K8S_GROUP}/{settings.K8S_VERSION}",
+            "kind": "MLJob",
+            "metadata": {
+                "name": name,
+                "namespace": namespace,
+                "labels": {
+                    "app": "kubeflow-mini",
+                    "component": "mljob",
+                    "job-id": job_id,
+                    "created-by": "kubeflow-mini"
+                }
+            },
+            "spec": spec
+        }
+        
+        return client.CustomObjectsApi().create_namespaced_custom_object(
+            group=settings.K8S_GROUP,
+            version=settings.K8S_VERSION,
+            namespace=namespace,
+            plural=settings.K8S_PLURAL,
+            body=body
+        )
+    except ApiException as e:
+        logger.error(f"Failed to create MLJob resource: {str(e)}")
+        raise
+
+def update_mljob_resource(name: str, namespace: str, spec: Dict[str, Any]):
+    """更新MLJob资源"""
+    try:
+        body = {
+            "apiVersion": f"{settings.K8S_GROUP}/{settings.K8S_VERSION}",
+            "kind": "MLJob",
+            "metadata": {
+                "name": name,
+                "namespace": namespace
+            },
+            "spec": spec
+        }
+        
+        return client.CustomObjectsApi().patch_namespaced_custom_object(
+            group=settings.K8S_GROUP,
+            version=settings.K8S_VERSION,
+            namespace=namespace,
+            plural=settings.K8S_PLURAL,
+            name=name,
+            body=body
+        )
+    except ApiException as e:
+        logger.error(f"Failed to update MLJob resource: {str(e)}")
+        raise
+
+def delete_mljob_resource(name: str, namespace: str):
+    """删除MLJob资源"""
+    try:
+        client.CustomObjectsApi().delete_namespaced_custom_object(
+            group=settings.K8S_GROUP,
+            version=settings.K8S_VERSION,
+            namespace=namespace,
+            plural=settings.K8S_PLURAL,
+            name=name
+        )
+    except ApiException as e:
+        if e.status != 404:  # 忽略不存在的资源
+            logger.error(f"Failed to delete MLJob resource: {str(e)}")
+            raise
+
+def get_mljob_status(name: str, namespace: str) -> Dict[str, Any]:
+    """获取MLJob状态"""
+    try:
+        job = client.CustomObjectsApi().get_namespaced_custom_object(
+            group=settings.K8S_GROUP,
+            version=settings.K8S_VERSION,
+            namespace=namespace,
+            plural=settings.K8S_PLURAL,
+            name=name
+        )
+        return job.get("status", {})
+    except ApiException as e:
+        if e.status != 404:  # 忽略不存在的资源
+            logger.error(f"Failed to get MLJob status: {str(e)}")
+        raise 
