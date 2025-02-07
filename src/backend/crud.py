@@ -25,12 +25,13 @@ except:
 # Kubernetes API客户端
 k8s_api = client.CustomObjectsApi()
 
-def create_k8s_mljob(name: str, namespace: str, spec: dict) -> dict:
+def create_k8s_mljob(name: str, namespace: str, job_id: str, spec: dict) -> dict:
     """在Kubernetes中创建MLJob资源
     
     Args:
         name: 资源名称
         namespace: 命名空间
+        job_id: 任务ID
         spec: MLJob规格
         
     Returns:
@@ -42,7 +43,11 @@ def create_k8s_mljob(name: str, namespace: str, spec: dict) -> dict:
             "kind": "MLJob",
             "metadata": {
                 "name": name,
-                "namespace": namespace
+                "namespace": namespace,
+                "labels": {
+                    "job-id": job_id,
+                    "created-by": "kubeflow-mini"
+                }
             },
             "spec": spec
         }
@@ -163,26 +168,60 @@ def create_k8s_owner(name: str, namespace: str, spec: dict) -> dict:
 def sync_mljob_status():
     """从Kubernetes同步MLJob状态
     
-    只同步需要更新状态的任务,通过任务ID精确获取
+    1. 同步活跃任务的状态
+    2. 对于error状态的任务,尝试重新创建k8s资源
     """
     try:
         with db_session:
             # 1. 获取需要同步状态的任务
-            # 选择状态不是终态的任务
             active_jobs = select(j for j in MLJob if j.status not in ["Succeeded", "Failed", "Deleted"])[:]
             
-            # 2. 批量获取这些任务的状态
             for job in active_jobs:
                 try:
-                    # 通过任务ID精确获取状态
-                    k8s_job = k8s_api.get_namespaced_custom_object(
+                    # 2. 检查是否需要创建k8s资源
+                    if job.status == "error":
+                        try:
+                            k8s_spec = {
+                                "project": job.project.name,
+                                "owner": job.user.username,
+                                "description": job.description,
+                                "training": json.loads(job.training_status) if job.training_status else {}
+                            }
+                            
+                            create_k8s_mljob(
+                                name=job.name,
+                                namespace=job.namespace,
+                                job_id=job.job_id,
+                                spec=k8s_spec
+                            )
+                            
+                            # 创建成功,更新状态
+                            job.status = "pending"
+                            job.message = "Kubernetes resource created"
+                            job.updated_at = datetime.utcnow()
+                            continue
+                            
+                        except Exception as e:
+                            logger.error(f"Failed to recreate Kubernetes resource for job {job.job_id}: {str(e)}")
+                            continue
+                    
+                    # 3. 同步现有资源的状态
+                    k8s_jobs = k8s_api.list_namespaced_custom_object(
                         group=settings.K8S_GROUP,
                         version=settings.K8S_VERSION,
                         namespace=job.namespace,
                         plural=settings.K8S_PLURAL,
-                        name=job.name
+                        label_selector=f"job-id={job.job_id}"
                     )
                     
+                    if not k8s_jobs.get("items"):
+                        # 资源不存在,标记为error以便下次重试
+                        job.status = "error"
+                        job.message = "Resource not found in Kubernetes"
+                        job.updated_at = datetime.utcnow()
+                        continue
+                        
+                    k8s_job = k8s_jobs["items"][0]
                     status = k8s_job.get("status", {})
                     
                     # 更新状态
@@ -201,13 +240,7 @@ def sync_mljob_status():
                         job.training_status = json.dumps(status["training_status"])
                         
                 except ApiException as e:
-                    if e.status == 404:
-                        # 资源已被删除
-                        job.status = "Deleted"
-                        job.message = "Resource not found in Kubernetes"
-                        job.updated_at = datetime.utcnow()
-                    else:
-                        logger.error(f"Failed to get MLJob status for {job.namespace}/{job.name}: {str(e)}")
+                    logger.error(f"Failed to sync MLJob status for {job.namespace}/{job.name}: {str(e)}")
                 except Exception as e:
                     logger.error(f"Error syncing MLJob {job.namespace}/{job.name}: {str(e)}")
                     
@@ -357,146 +390,76 @@ def get_user_projects(user_id: int, skip: int = 0, limit: int = 100) -> List[Pro
 def create_mljob(mljob: MLJobCreate, user_id: int) -> MLJob:
     """创建ML任务
     
-    同时在数据库和Kubernetes中创建MLJob资源
+    先在数据库中创建记录,然后尝试创建Kubernetes资源
+    如果Kubernetes资源创建失败,保留数据库记录,由状态同步任务处理
     """
     try:
         # 1. 创建数据库记录
         db_mljob = MLJob(
-            name=mljob.name,
+            job_id=mljob.job_id,
+            name=f"mljob-{mljob.job_id}",
             namespace=mljob.namespace or "default",
             description=mljob.description,
-            framework=mljob.framework,
-            gpu_request=mljob.gpu_request,
-            cpu_request=mljob.cpu_request,
-            memory_request=mljob.memory_request,
-            command=mljob.command,
-            args=json.dumps(mljob.args),
-            environment=json.dumps(mljob.environment),
             status="pending",
             project=mljob.project_id,
             user=user_id
         )
         
-        # 2. 创建Kubernetes资源
-        k8s_spec = {
-            "job_id": str(db_mljob.id),
-            "project": db_mljob.project.name,
-            "owner": db_mljob.user.username,
-            "description": db_mljob.description,
-            "training": {
-                "api_version": f"kubeflow.org/v1",
-                "kind": f"{db_mljob.framework}Job",
-                "spec": {
-                    # 根据framework构造对应的training operator配置
-                    f"{db_mljob.framework.lower()}ReplicaSpecs": {
-                        "Worker": {
-                            "replicas": 1,
-                            "template": {
-                                "spec": {
-                                    "containers": [{
-                                        "name": "training",
-                                        "image": mljob.image,
-                                        "command": [db_mljob.command],
-                                        "args": json.loads(db_mljob.args),
-                                        "env": json.loads(db_mljob.environment),
-                                        "resources": {
-                                            "limits": {
-                                                "nvidia.com/gpu": db_mljob.gpu_request,
-                                                "cpu": db_mljob.cpu_request,
-                                                "memory": db_mljob.memory_request
-                                            },
-                                            "requests": {
-                                                "nvidia.com/gpu": db_mljob.gpu_request,
-                                                "cpu": db_mljob.cpu_request,
-                                                "memory": db_mljob.memory_request
-                                            }
-                                        }
-                                    }]
-                                }
-                            }
-                        }
-                    }
-                }
+        # 提交数据库事务,确保记录创建成功
+        db.commit()
+        
+        try:
+            # 2. 尝试创建Kubernetes资源
+            k8s_spec = {
+                "project": db_mljob.project.name,
+                "owner": db_mljob.user.username,
+                "description": db_mljob.description,
+                "training": mljob.training_spec  # 直接使用传入的training配置
             }
-        }
-        
-        create_k8s_mljob(db_mljob.name, db_mljob.namespace, k8s_spec)
+            
+            create_k8s_mljob(
+                name=db_mljob.name,
+                namespace=db_mljob.namespace,
+                job_id=db_mljob.job_id,
+                spec=k8s_spec
+            )
+        except Exception as e:
+            # 如果创建k8s资源失败,记录错误状态
+            logger.error(f"Failed to create Kubernetes resource for job {db_mljob.job_id}: {str(e)}")
+            db_mljob.status = "error"
+            db_mljob.message = f"Failed to create Kubernetes resource: {str(e)}"
+            db_mljob.updated_at = datetime.utcnow()
+            
         return db_mljob
-        
+            
     except Exception as e:
-        # 如果出现错误,清理已创建的资源
-        if "db_mljob" in locals():
-            try:
-                delete_k8s_mljob(db_mljob.name, db_mljob.namespace)
-            except:
-                pass
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create MLJob: {str(e)}"
         )
 
 @db_session
-def update_mljob(job_id: int, mljob: MLJobCreate) -> MLJob:
+def update_mljob(job_id: str, mljob: MLJobCreate) -> MLJob:
     """更新ML任务
     
     同时更新数据库和Kubernetes中的MLJob资源
     """
     try:
         # 1. 更新数据库记录
-        db_job = MLJob.get(id=job_id)
+        db_job = MLJob.get(job_id=job_id)  # 通过job_id查找
         if not db_job:
             raise HTTPException(status_code=404, detail="MLJob not found")
             
         # 更新字段
         db_job.description = mljob.description
-        db_job.gpu_request = mljob.gpu_request
-        db_job.cpu_request = mljob.cpu_request
-        db_job.memory_request = mljob.memory_request
-        db_job.command = mljob.command
-        db_job.args = json.dumps(mljob.args)
-        db_job.environment = json.dumps(mljob.environment)
         db_job.updated_at = datetime.utcnow()
         
         # 2. 更新Kubernetes资源
         k8s_spec = {
-            "job_id": str(db_job.id),
             "project": db_job.project.name,
             "owner": db_job.user.username,
             "description": db_job.description,
-            "training": {
-                "api_version": f"kubeflow.org/v1",
-                "kind": f"{db_job.framework}Job",
-                "spec": {
-                    f"{db_job.framework.lower()}ReplicaSpecs": {
-                        "Worker": {
-                            "replicas": 1,
-                            "template": {
-                                "spec": {
-                                    "containers": [{
-                                        "name": "training",
-                                        "image": mljob.image,
-                                        "command": [db_job.command],
-                                        "args": json.loads(db_job.args),
-                                        "env": json.loads(db_job.environment),
-                                        "resources": {
-                                            "limits": {
-                                                "nvidia.com/gpu": db_job.gpu_request,
-                                                "cpu": db_job.cpu_request,
-                                                "memory": db_job.memory_request
-                                            },
-                                            "requests": {
-                                                "nvidia.com/gpu": db_job.gpu_request,
-                                                "cpu": db_job.cpu_request,
-                                                "memory": db_job.memory_request
-                                            }
-                                        }
-                                    }]
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            "training": mljob.training_spec  # 直接使用传入的training配置
         }
         
         update_k8s_mljob(db_job.name, db_job.namespace, k8s_spec)
@@ -511,14 +474,14 @@ def update_mljob(job_id: int, mljob: MLJobCreate) -> MLJob:
         )
 
 @db_session
-def delete_mljob(job_id: int):
+def delete_mljob(job_id: str):
     """删除ML任务
     
     同时删除数据库和Kubernetes中的MLJob资源
     """
     try:
         # 1. 获取数据库记录
-        db_job = MLJob.get(id=job_id)
+        db_job = MLJob.get(job_id=job_id)  # 通过job_id查找
         if not db_job:
             raise HTTPException(status_code=404, detail="MLJob not found")
             
