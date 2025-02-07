@@ -1,0 +1,177 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubeflow-mini-operator
+  namespace: default
+  labels:
+    app: kubeflow-mini
+    component: operator
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubeflow-mini-operator-config
+  namespace: default
+  labels:
+    app: kubeflow-mini
+    component: operator
+data:
+  config.yaml: |
+    # 重试策略配置
+    retry:
+      default:
+        max_retries: 3
+        delay: 1
+      operations:
+        create:
+          max_retries: 3
+          delay: 2
+          description: "创建操作重试配置"
+        delete:
+          max_retries: 5
+          delay: 1
+          description: "删除操作重试配置"
+        update:
+          max_retries: 3
+          delay: 2
+          description: "更新操作重试配置"
+        get:
+          max_retries: 3
+          delay: 1
+          description: "获取操作重试配置"
+
+    # 日志配置
+    logging:
+      level: INFO
+      format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+
+    # API配置
+    api:
+      group: "kubeflow-mini.io"
+      version: "v1"
+      plural: "mljobs"
+
+    # 状态配置
+    status:
+      phases:
+        - Created
+        - Running
+        - Failed
+        - Succeeded
+        - Deleted
+      conditions:
+        default_status: "True"
+        time_format: "%Y-%m-%dT%H:%M:%SZ"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubeflow-mini-operator
+  labels:
+    app: kubeflow-mini
+    component: operator
+rules:
+# MLJob资源的权限
+- apiGroups: ["kubeflow-mini.io"]
+  resources: ["mljobs", "mljobs/status", "mljobs/finalizers"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Project资源的权限
+- apiGroups: ["kubeflow-mini.io"]
+  resources: ["projects", "projects/status", "projects/finalizers"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Owner资源的权限
+- apiGroups: ["kubeflow-mini.io"]
+  resources: ["owners", "owners/status", "owners/finalizers"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Training Operator资源的权限
+- apiGroups: ["kubeflow.org"]
+  resources: ["tfjobs", "tfjobs/status", "pytorchjobs", "pytorchjobs/status"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# 事件权限
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubeflow-mini-operator
+  labels:
+    app: kubeflow-mini
+    component: operator
+subjects:
+- kind: ServiceAccount
+  name: kubeflow-mini-operator
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: kubeflow-mini-operator
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubeflow-mini-operator
+  namespace: default
+  labels:
+    app: kubeflow-mini
+    component: operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubeflow-mini
+      component: operator
+  template:
+    metadata:
+      labels:
+        app: kubeflow-mini
+        component: operator
+    spec:
+      serviceAccountName: kubeflow-mini-operator
+      containers:
+      - name: operator
+        image: kubeflow-mini-operator:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: WATCH_NAMESPACE
+          value: ""  # Watch all namespaces
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: OPERATOR_NAME
+          value: "kubeflow-mini-operator"
+        - name: KOPF_STANDALONE
+          value: "1"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: CONFIG_FILE
+          value: "/etc/kubeflow-mini/config.yaml"
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "200Mi"
+          limits:
+            cpu: "500m"
+            memory: "500Mi"
+        volumeMounts:
+        - name: config
+          mountPath: /etc/kubeflow-mini
+          readOnly: true
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 20
+      volumes:
+      - name: config
+        configMap:
+          name: kubeflow-mini-operator-config 
