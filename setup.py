@@ -10,11 +10,18 @@ setup(
         "kubernetes>=28.1.0",
         "click>=8.1.3",
         "tabulate>=0.9.0",
+        "pyyaml>=5.1",
     ],
     entry_points={
         "console_scripts": [
             "kubeflow-mini=kubeflow_mini.cli:main",
         ],
     },
+    package_data={
+        "kubeflow_mini": ["config/*.yaml"],
+    },
+    data_files=[
+        ('config', ['config/config.yaml']),
+    ],
     python_requires=">=3.8",
 ) 

@@ -14,17 +14,14 @@ from kubernetes.client.rest import ApiException
 from datetime import datetime
 from functools import wraps
 import time
+from ..config import config
 
 # 创建Kubernetes API客户端
 api = k8s.CustomObjectsApi()
 
-# 重试配置
-RETRY_CONFIG = {
-    'create': {'max_retries': 3, 'delay': 2},  # 创建操作重试配置
-    'delete': {'max_retries': 5, 'delay': 1},  # 删除操作重试配置
-    'update': {'max_retries': 3, 'delay': 2},  # 更新操作重试配置
-    'get': {'max_retries': 3, 'delay': 1},     # 获取操作重试配置
-}
+# 获取API配置
+API_CONFIG = config.get_api_config()
+STATUS_CONFIG = config.get_status_config()
 
 class MLJobError(Exception):
     """MLJob操作异常基类
@@ -69,9 +66,9 @@ def retry_on_error(operation='default'):
     3. 其他API异常: 直接抛出
     4. 其他异常: 按配置重试
     """
-    config = RETRY_CONFIG.get(operation, {'max_retries': 3, 'delay': 1})
-    max_retries = config['max_retries']
-    delay = config['delay']
+    retry_config = config.get_retry_config(operation)
+    max_retries = retry_config.get('max_retries', 3)
+    delay = retry_config.get('delay', 1)
     
     def decorator(func):
         @wraps(func)
@@ -130,10 +127,10 @@ def get_mljob(name, namespace, logger=None):
     """
     try:
         return api.get_namespaced_custom_object(
-            group="kubeflow-mini.io",
-            version="v1",
+            group=API_CONFIG['group'],
+            version=API_CONFIG['version'],
             namespace=namespace,
-            plural="mljobs",
+            plural=API_CONFIG['plural'],
             name=name
         )
     except ApiException as e:
@@ -451,7 +448,15 @@ def monitor_job_status(status, body, name, namespace, logger, **kwargs):
     """
     try:
         phase = status.get('phase', '').lower()
-        current_time = datetime.utcnow().isoformat() + "Z"
+        current_time = datetime.strftime(
+            datetime.utcnow(),
+            STATUS_CONFIG['conditions']['time_format']
+        )
+        
+        # 验证状态是否有效
+        if phase.capitalize() not in STATUS_CONFIG['phases']:
+            logger.warning(f"Invalid phase: {phase}")
+            phase = 'Unknown'
         
         # 获取开始时间
         start_time = body.get('status', {}).get('startTime')
@@ -459,7 +464,10 @@ def monitor_job_status(status, body, name, namespace, logger, **kwargs):
         # 计算持续时间
         if start_time:
             try:
-                start = datetime.fromisoformat(start_time.rstrip('Z'))
+                start = datetime.strptime(
+                    start_time,
+                    STATUS_CONFIG['conditions']['time_format']
+                )
                 current = datetime.utcnow()
                 duration = str(current - start)
             except ValueError as e:
@@ -474,7 +482,7 @@ def monitor_job_status(status, body, name, namespace, logger, **kwargs):
                 'duration': duration,
                 'conditions': [{
                     'type': phase.capitalize(),
-                    'status': 'True',
+                    'status': STATUS_CONFIG['conditions']['default_status'],
                     'lastTransitionTime': current_time,
                     'reason': f'Job{phase.capitalize()}',
                     'message': f'Job is {phase}'
