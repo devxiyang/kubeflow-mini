@@ -16,7 +16,8 @@ from .k8s import (
     create_mljob_resource, update_mljob_resource,
     delete_mljob_resource, get_mljob_status,
     create_notebook_resources, update_notebook_resources,
-    delete_notebook_resources, get_notebook_endpoint
+    delete_notebook_resources, get_notebook_endpoint,
+    create_namespace, update_namespace_quota, delete_namespace
 )
 
 # 配置日志
@@ -100,7 +101,10 @@ def get_users(skip: int = 0, limit: int = 100) -> List[User]:
 def create_project(project: ProjectCreate, owner_id: int) -> Project:
     """创建项目
     
-    同时在数据库和Kubernetes中创建Project资源
+    同时创建:
+    1. 数据库记录
+    2. Kubernetes Namespace
+    3. ResourceQuota
     """
     try:
         # 1. 获取所有者信息
@@ -119,36 +123,40 @@ def create_project(project: ProjectCreate, owner_id: int) -> Project:
             owner=owner_id
         )
         
-        # 3. 创建Kubernetes Project资源
-        k8s_spec = {
-            "owner": owner.username,
-            "description": project.description,
-            "quotas": {
-                "gpu": project.gpu_limit,
-                "cpu": project.cpu_limit,
-                "memory": project.memory_limit,
-                "maxJobs": project.max_jobs
-            }
-        }
-        
-        create_k8s_project(project.name, "default", k8s_spec)
-        return db_project
-        
+        try:
+            # 3. 创建Kubernetes Namespace和ResourceQuota
+            create_namespace(
+                name=project.name,
+                labels={
+                    "owner": owner.username,
+                    "project": project.name
+                }
+            )
+            
+            # 4. 设置资源配额
+            update_namespace_quota(
+                name=project.name,
+                cpu_limit=project.cpu_limit,
+                memory_limit=project.memory_limit,
+                gpu_limit=project.gpu_limit
+            )
+            
+            return db_project
+            
+        except Exception as e:
+            # 如果创建k8s资源失败,清理已创建的资源
+            try:
+                delete_namespace(project.name)
+            except:
+                pass
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create Kubernetes resources: {str(e)}"
+            )
+            
     except HTTPException:
         raise
     except Exception as e:
-        # 如果出现错误,清理已创建的资源
-        if "db_project" in locals():
-            try:
-                k8s_api.delete_namespaced_custom_object(
-                    group=settings.K8S_GROUP,
-                    version=settings.K8S_VERSION,
-                    namespace="default",
-                    plural="projects",
-                    name=db_project.name
-                )
-            except:
-                pass
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create project: {str(e)}"
@@ -168,6 +176,77 @@ def get_projects(skip: int = 0, limit: int = 100) -> List[Project]:
 def get_user_projects(user_id: int, skip: int = 0, limit: int = 100) -> List[Project]:
     """获取用户的项目列表"""
     return select(p for p in Project if p.owner.id == user_id).offset(skip).limit(limit)[:]
+
+@db_session
+def update_project(project_id: int, project: ProjectCreate) -> Project:
+    """更新项目
+    
+    同时更新:
+    1. 数据库记录
+    2. Namespace ResourceQuota
+    """
+    try:
+        # 1. 获取项目记录
+        db_project = Project.get(id=project_id)
+        if not db_project:
+            raise HTTPException(status_code=404, detail="Project not found")
+            
+        # 2. 更新数据库记录
+        db_project.description = project.description
+        db_project.gpu_limit = project.gpu_limit
+        db_project.cpu_limit = project.cpu_limit
+        db_project.memory_limit = project.memory_limit
+        db_project.max_jobs = project.max_jobs
+        db_project.updated_at = datetime.utcnow()
+        
+        # 3. 更新资源配额
+        update_namespace_quota(
+            name=db_project.name,
+            cpu_limit=project.cpu_limit,
+            memory_limit=project.memory_limit,
+            gpu_limit=project.gpu_limit
+        )
+        
+        return db_project
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update project: {str(e)}"
+        )
+
+@db_session
+def delete_project(project_id: int):
+    """删除项目
+    
+    同时删除:
+    1. 数据库记录
+    2. Kubernetes Namespace(会自动删除所有关联资源)
+    """
+    try:
+        # 1. 获取项目记录
+        db_project = Project.get(id=project_id)
+        if not db_project:
+            raise HTTPException(status_code=404, detail="Project not found")
+            
+        # 2. 删除Kubernetes Namespace
+        try:
+            delete_namespace(db_project.name)
+        except Exception as e:
+            logger.error(f"Failed to delete namespace {db_project.name}: {str(e)}")
+            
+        # 3. 删除数据库记录
+        db_project.delete()
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete project: {str(e)}"
+        )
 
 # MLJob operations
 @db_session
