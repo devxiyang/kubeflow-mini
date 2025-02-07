@@ -1,0 +1,68 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: owners.kubeflow-mini.io
+spec:
+  group: kubeflow-mini.io
+  names:
+    kind: Owner
+    listKind: OwnerList
+    plural: owners
+    singular: owner
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - jsonPath: .spec.name
+          name: Name
+          type: string
+        - jsonPath: .spec.department
+          name: Department
+          type: string
+        - jsonPath: .metadata.creationTimestamp
+          name: Age
+          type: date
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: ["spec"]
+          properties:
+            spec:
+              type: object
+              required: ["name", "department"]
+              properties:
+                name:
+                  type: string
+                  description: "Name of the owner"
+                department:
+                  type: string
+                  description: "Department the owner belongs to"
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: "Current phase of the owner"
+                  enum: ["Active", "Inactive"]
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: ["type", "status"]
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+      subresources:
+        status: {} 

@@ -1,0 +1,21 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubeflow-mini-project
+rules:
+- apiGroups: ["kubeflow-mini.io"]
+  resources: ["projects", "projects/status", "projects/finalizers"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubeflow-mini-project
+subjects:
+- kind: ServiceAccount
+  name: kubeflow-mini-operator
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: kubeflow-mini-project
+  apiGroup: rbac.authorization.k8s.io 

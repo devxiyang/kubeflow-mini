@@ -1,0 +1,32 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubeflow-mini-mljob
+rules:
+# MLJob资源的权限
+- apiGroups: ["kubeflow-mini.io"]
+  resources: ["mljobs", "mljobs/status", "mljobs/finalizers"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+# Training Operator资源的权限
+- apiGroups: ["kubeflow.org"]
+  resources: ["tfjobs", "tfjobs/status", "pytorchjobs", "pytorchjobs/status"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+# 引用Project和Owner的权限
+- apiGroups: ["kubeflow-mini.io"]
+  resources: ["projects", "owners"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubeflow-mini-mljob
+subjects:
+- kind: ServiceAccount
+  name: kubeflow-mini-operator
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: kubeflow-mini-mljob
+  apiGroup: rbac.authorization.k8s.io 
