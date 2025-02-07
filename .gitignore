@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Frontend
+src/frontend/node_modules/
+src/frontend/.next/
+src/frontend/out/
+src/frontend/.env
+src/frontend/.env.local
+src/frontend/.env.development.local
+src/frontend/.env.test.local
+src/frontend/.env.production.local
+src/frontend/npm-debug.log*
+src/frontend/yarn-debug.log*
+src/frontend/yarn-error.log*
+src/frontend/.DS_Store
+
+# Database
+*.db
+*.sqlite3
+
+# Kubernetes
+kubeconfig
+.kube/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db 
