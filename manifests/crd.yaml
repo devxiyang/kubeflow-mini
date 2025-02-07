@@ -18,6 +18,12 @@ spec:
         - name: Status
           type: string
           jsonPath: .status.phase
+        - name: Project
+          type: string
+          jsonPath: .spec.project
+        - name: Owner
+          type: string
+          jsonPath: .spec.owner
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
@@ -29,8 +35,33 @@ spec:
           properties:
             spec:
               type: object
-              required: ["training"]
+              required: ["training", "project", "owner"]
               properties:
+                # 管理信息
+                jobId:
+                  type: string
+                  description: "任务ID"
+                project:
+                  type: string
+                  description: "项目名称"
+                owner:
+                  type: string
+                  description: "任务所有者"
+                description:
+                  type: string
+                  description: "任务描述"
+                tags:
+                  type: array
+                  description: "标签列表"
+                  items:
+                    type: string
+                priority:
+                  type: integer
+                  description: "任务优先级"
+                  minimum: 0
+                  maximum: 100
+                  default: 50
+                # Training配置
                 training:
                   type: object
                   description: "training-operator的任务配置"
@@ -42,6 +73,17 @@ spec:
                   type: string
                   description: "任务状态"
                   enum: ["Created", "Running", "Failed", "Succeeded", "Deleted"]
+                startTime:
+                  type: string
+                  format: date-time
+                  description: "任务开始时间"
+                completionTime:
+                  type: string
+                  format: date-time
+                  description: "任务完成时间"
+                duration:
+                  type: string
+                  description: "任务运行时长"
                 conditions:
                   type: array
                   items:

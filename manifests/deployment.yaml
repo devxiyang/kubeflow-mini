@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubeflow-mini-operator
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubeflow-mini-operator
+  template:
+    metadata:
+      labels:
+        app: kubeflow-mini-operator
+    spec:
+      serviceAccountName: kubeflow-mini-operator
+      containers:
+      - name: operator
+        image: python:3.8-slim
+        command:
+        - python
+        - "-m"
+        - "kubeflow_mini"
+        resources:
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+          requests:
+            cpu: "200m"
+            memory: "256Mi" 

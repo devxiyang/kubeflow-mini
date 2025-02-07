@@ -3,6 +3,7 @@ import kopf
 import logging
 import kubernetes.client as k8s
 from kubernetes.client.rest import ApiException
+from datetime import datetime
 
 # 创建Kubernetes API客户端
 api = k8s.CustomObjectsApi()
@@ -39,7 +40,7 @@ def get_training_job(training_spec, name, namespace):
             return None
         raise e
 
-def create_training_job(name, namespace, training_spec, logger):
+def create_training_job(name, namespace, training_spec, spec, logger):
     """创建training-operator任务"""
     try:
         # 从training_spec中获取API信息
@@ -49,7 +50,17 @@ def create_training_job(name, namespace, training_spec, logger):
         # 设置training-operator任务的元数据
         training_spec['metadata'] = {
             'name': name,
-            'namespace': namespace
+            'namespace': namespace,
+            'labels': {
+                'mljob.kubeflow-mini.io/job-id': spec.get('jobId', ''),
+                'mljob.kubeflow-mini.io/project': spec.get('project', ''),
+                'mljob.kubeflow-mini.io/owner': spec.get('owner', '')
+            },
+            'annotations': {
+                'mljob.kubeflow-mini.io/description': spec.get('description', ''),
+                'mljob.kubeflow-mini.io/priority': str(spec.get('priority', 50)),
+                'mljob.kubeflow-mini.io/tags': ','.join(spec.get('tags', []))
+            }
         }
 
         # 创建training-operator任务
@@ -95,17 +106,19 @@ def create_ml_job(spec, name, namespace, logger, **kwargs):
             raise kopf.PermanentError("Training spec must be provided")
 
         # 创建training-operator任务
-        create_training_job(name, namespace, training_spec, logger)
+        create_training_job(name, namespace, training_spec, spec, logger)
         logger.info(f"Successfully created ML job: {name}")
 
         # 返回初始状态
+        current_time = datetime.utcnow().isoformat() + "Z"
         return {
             'status': {
                 'phase': 'Created',
+                'startTime': current_time,
                 'conditions': [{
                     'type': 'Created',
                     'status': 'True',
-                    'lastTransitionTime': kopf.datetime.datetime.now().isoformat(),
+                    'lastTransitionTime': current_time,
                     'reason': 'JobCreated',
                     'message': 'Job was created successfully'
                 }]
@@ -126,13 +139,15 @@ def delete_ml_job(spec, name, namespace, logger, **kwargs):
             delete_training_job(name, namespace, training_spec, logger)
 
         logger.info(f"Successfully deleted ML job: {name}")
+        current_time = datetime.utcnow().isoformat() + "Z"
         return {
             'status': {
                 'phase': 'Deleted',
+                'completionTime': current_time,
                 'conditions': [{
                     'type': 'Deleted',
                     'status': 'True',
-                    'lastTransitionTime': kopf.datetime.datetime.now().isoformat(),
+                    'lastTransitionTime': current_time,
                     'reason': 'JobDeleted',
                     'message': 'Job was deleted successfully'
                 }]
@@ -155,16 +170,17 @@ def update_ml_job(spec, old, new, name, namespace, logger, **kwargs):
                 delete_training_job(name, namespace, old_training, logger)
             
             # 创建新的training-operator任务
-            create_training_job(name, namespace, training_spec, logger)
+            create_training_job(name, namespace, training_spec, spec, logger)
 
         logger.info(f"Successfully updated ML job: {name}")
+        current_time = datetime.utcnow().isoformat() + "Z"
         return {
             'status': {
                 'phase': 'Running',
                 'conditions': [{
                     'type': 'Updated',
                     'status': 'True',
-                    'lastTransitionTime': kopf.datetime.datetime.now().isoformat(),
+                    'lastTransitionTime': current_time,
                     'reason': 'JobUpdated',
                     'message': 'Job was updated successfully'
                 }]
@@ -176,51 +192,42 @@ def update_ml_job(spec, old, new, name, namespace, logger, **kwargs):
         raise kopf.PermanentError(str(e))
 
 @kopf.on.field('mljobs', field='status.phase')
-def monitor_job_status(status, name, namespace, logger, **kwargs):
+def monitor_job_status(status, body, name, namespace, logger, **kwargs):
     """监控任务状态变化"""
     try:
         phase = status.get('phase', '').lower()
-        current_time = kopf.datetime.datetime.now().isoformat()
+        current_time = datetime.utcnow().isoformat() + "Z"
         
-        if phase == 'succeeded':
-            return {
-                'status': {
-                    'phase': 'Succeeded',
-                    'conditions': [{
-                        'type': 'Succeeded',
-                        'status': 'True',
-                        'lastTransitionTime': current_time,
-                        'reason': 'JobSucceeded',
-                        'message': 'Job completed successfully'
-                    }]
-                }
+        # 获取开始时间
+        start_time = body.get('status', {}).get('startTime')
+        
+        # 计算持续时间
+        if start_time:
+            start = datetime.fromisoformat(start_time.rstrip('Z'))
+            current = datetime.utcnow()
+            duration = str(current - start)
+        else:
+            duration = None
+
+        status_update = {
+            'status': {
+                'phase': phase.capitalize(),
+                'duration': duration,
+                'conditions': [{
+                    'type': phase.capitalize(),
+                    'status': 'True',
+                    'lastTransitionTime': current_time,
+                    'reason': f'Job{phase.capitalize()}',
+                    'message': f'Job is {phase}'
+                }]
             }
-        elif phase == 'failed':
-            return {
-                'status': {
-                    'phase': 'Failed',
-                    'conditions': [{
-                        'type': 'Failed',
-                        'status': 'True',
-                        'lastTransitionTime': current_time,
-                        'reason': 'JobFailed',
-                        'message': 'Job failed to complete'
-                    }]
-                }
-            }
-        elif phase in ['running', 'active']:
-            return {
-                'status': {
-                    'phase': 'Running',
-                    'conditions': [{
-                        'type': 'Running',
-                        'status': 'True',
-                        'lastTransitionTime': current_time,
-                        'reason': 'JobRunning',
-                        'message': 'Job is running'
-                    }]
-                }
-            }
+        }
+
+        # 对于完成或失败的任务，添加完成时间
+        if phase in ['succeeded', 'failed']:
+            status_update['status']['completionTime'] = current_time
+
+        return status_update
                 
     except Exception as e:
         logger.error(f"Error monitoring job status: {e}") 
