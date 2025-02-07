@@ -8,7 +8,6 @@ setup(
     install_requires=[
         "kopf>=1.35.6",
         "kubernetes>=28.1.0",
-        "pony>=0.7.16",
         "click>=8.1.3",
         "tabulate>=0.9.0",
     ],

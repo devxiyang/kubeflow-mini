@@ -1,7 +1,6 @@
 """CLI命令"""
 import click
 from tabulate import tabulate
-from ..db import init_db, list_jobs, get_job
 from kubernetes import config, client
 from kubernetes.client.rest import ApiException
 
@@ -16,66 +15,11 @@ def init_kubernetes():
 @click.group()
 def cli():
     """机器学习任务管理工具"""
-    init_db()
-
-@cli.command()
-@click.option('--namespace', help='筛选指定命名空间的任务')
-@click.option('--status', help='筛选指定状态的任务')
-def list(namespace=None, status=None):
-    """列出所有任务"""
-    jobs = list_jobs(namespace, status)
-    
-    headers = ['名称', '命名空间', '框架', '状态', '创建时间']
-    rows = []
-    
-    for job in jobs:
-        rows.append([
-            job.name,
-            job.namespace,
-            job.framework,
-            job.status,
-            job.created_at.strftime('%Y-%m-%d %H:%M:%S')
-        ])
-    
-    if rows:
-        print(tabulate(rows, headers=headers, tablefmt='grid'))
-    else:
-        print("没有找到任何任务")
-
-@cli.command()
-@click.argument('name')
-@click.argument('namespace')
-def status(name, namespace):
-    """查看指定任务的详细状态"""
-    job = get_job(name, namespace)
-    
-    if job:
-        print("\n任务详情:")
-        print(f"名称: {job.name}")
-        print(f"命名空间: {job.namespace}")
-        print(f"框架: {job.framework}")
-        print(f"版本: {job.framework_version}")
-        print(f"分布式训练: {'是' if job.distributed else '否'}")
-        print(f"Worker副本数: {job.worker_replicas}")
-        
-        if job.ps_replicas and job.ps_replicas > 0:
-            print(f"Parameter Server副本数: {job.ps_replicas}")
-            
-        print(f"镜像: {job.image}")
-        print(f"状态: {job.status}")
-        print(f"创建时间: {job.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        if job.completed_at:
-            print(f"完成时间: {job.completed_at.strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        if job.error_message:
-            print(f"错误信息: {job.error_message}")
-    else:
-        print(f"未找到任务: {name} (命名空间: {namespace})")
+    pass
 
 @cli.command()
 @click.option('--namespace', '-n', default='default', help='命名空间')
-def list_mljob(namespace):
+def list(namespace):
     """列出所有MLJob"""
     api = init_kubernetes()
     try:
@@ -110,7 +54,7 @@ def list_mljob(namespace):
 @click.argument('name')
 @click.option('--namespace', '-n', default='default', help='命名空间')
 @click.option('--show-training/--no-training', default=False, help='是否显示training-operator任务信息')
-def get_mljob(name, namespace, show_training):
+def get(name, namespace, show_training):
     """获取MLJob详细信息"""
     api = init_kubernetes()
     try:
