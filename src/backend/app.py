@@ -21,7 +21,8 @@ from .crud import (
     update_mljob_status,
     create_notebook, get_notebook, get_notebooks, get_project_notebooks,
     get_user_notebooks, update_notebook, delete_notebook,
-    start_notebook, stop_notebook, check_notebook_leases
+    start_notebook, stop_notebook, check_notebook_leases,
+    renew_notebook_lease
 )
 from .security import (
     authenticate_user, create_access_token,
@@ -386,4 +387,56 @@ async def stop_notebook_instance(
     if db_notebook.user.id != current_user.id:
         raise HTTPException(status_code=403, detail="Not enough permissions")
     stop_notebook(notebook_id=notebook_id)
-    return {"ok": True} 
+    return {"ok": True}
+
+@app.post("/notebooks/{notebook_id}/renew")
+async def renew_notebook_lease(
+    notebook_id: int,
+    current_user: User = Depends(get_current_active_user)
+):
+    """续租Notebook"""
+    db_notebook = get_notebook(notebook_id=notebook_id)
+    if db_notebook is None:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    if db_notebook.user.id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+    
+    try:
+        notebook = renew_notebook_lease(notebook_id=notebook_id)
+        return {
+            "ok": True,
+            "lease_status": notebook.lease_status,
+            "lease_start": notebook.lease_start,
+            "lease_duration": notebook.lease_duration,
+            "lease_renewal_count": notebook.lease_renewal_count,
+            "max_lease_renewals": notebook.max_lease_renewals
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/notebooks/{notebook_id}/lease")
+async def get_notebook_lease_info(
+    notebook_id: int,
+    current_user: User = Depends(get_current_active_user)
+):
+    """获取Notebook租约信息"""
+    db_notebook = get_notebook(notebook_id=notebook_id)
+    if db_notebook is None:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    if db_notebook.user.id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+    
+    # 计算剩余时间
+    remaining_time = None
+    if db_notebook.lease_start and db_notebook.lease_status == "active":
+        lease_end = db_notebook.lease_start + timedelta(hours=db_notebook.lease_duration)
+        remaining_time = (lease_end - datetime.utcnow()).total_seconds()
+    
+    return {
+        "lease_status": db_notebook.lease_status,
+        "lease_start": db_notebook.lease_start,
+        "lease_duration": db_notebook.lease_duration,
+        "lease_renewal_count": db_notebook.lease_renewal_count,
+        "max_lease_renewals": db_notebook.max_lease_renewals,
+        "remaining_seconds": remaining_time if remaining_time and remaining_time > 0 else 0
+    } 

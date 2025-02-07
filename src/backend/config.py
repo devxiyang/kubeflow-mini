@@ -16,6 +16,14 @@ class ResourceSettings(BaseSettings):
     max_job_age: int = 30  # 已完成任务保留天数
     batch_size: int = 100  # 批处理大小
 
+class NotebookSettings(BaseSettings):
+    """Notebook配置"""
+    default_lease_duration: int = 24  # 默认租约时长(小时)
+    max_lease_duration: int = 168  # 最大租约时长(小时)
+    default_max_renewals: int = 3  # 默认最大续租次数
+    lease_check_interval: int = 300  # 租约检查间隔(秒)
+    lease_warning_threshold: int = 3600  # 租约到期警告阈值(秒)
+
 class Settings(BaseSettings):
     """应用配置"""
     # API配置
@@ -48,6 +56,9 @@ class Settings(BaseSettings):
     
     # 资源管理配置
     RESOURCE: ResourceSettings = ResourceSettings()
+    
+    # Notebook配置
+    NOTEBOOK: NotebookSettings = NotebookSettings()
     
     # 状态同步配置
     SYNC_BATCH_SIZE: int = 50  # 每次同步的任务数量

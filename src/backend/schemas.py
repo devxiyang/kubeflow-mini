@@ -14,6 +14,8 @@ class NotebookBase(BaseModel):
     gpu_limit: int = 0
     cpu_limit: float = 1.0
     memory_limit: str = "1Gi"
+    lease_duration: Optional[int] = 24  # 租约时长(小时)
+    max_lease_renewals: Optional[int] = 3  # 最大续租次数
 
 class NotebookCreate(NotebookBase):
     """创建Notebook请求"""
@@ -25,6 +27,8 @@ class NotebookUpdate(BaseModel):
     gpu_limit: Optional[int] = None
     cpu_limit: Optional[float] = None
     memory_limit: Optional[str] = None
+    lease_duration: Optional[int] = None
+    max_lease_renewals: Optional[int] = None
 
 class Notebook(NotebookBase):
     """Notebook响应"""
@@ -37,6 +41,9 @@ class Notebook(NotebookBase):
     updated_at: datetime
     started_at: Optional[datetime] = None
     stopped_at: Optional[datetime] = None
+    lease_status: str
+    lease_start: Optional[datetime] = None
+    lease_renewal_count: int = 0
     project_id: int
     user_id: int
 
