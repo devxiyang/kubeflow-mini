@@ -21,7 +21,7 @@ from .crud import (
     update_mljob_status,
     create_notebook, get_notebook, get_notebooks, get_project_notebooks,
     get_user_notebooks, update_notebook, delete_notebook,
-    start_notebook, stop_notebook
+    start_notebook, stop_notebook, check_notebook_leases
 )
 from .security import (
     authenticate_user, create_access_token,
@@ -74,6 +74,16 @@ async def cleanup_jobs():
         cleanup_resources()
     except Exception as e:
         logger.error(f"Failed to cleanup resources: {str(e)}")
+
+@app.on_event("startup")
+@repeat_every(seconds=300)  # 每5分钟检查一次
+async def check_notebook_lease_status():
+    """定期检查Notebook租约状态"""
+    try:
+        logger.info("Starting notebook lease check")
+        check_notebook_leases()
+    except Exception as e:
+        logger.error(f"Failed to check notebook leases: {str(e)}")
 
 # 认证路由
 @app.post("/token", response_model=Token)
