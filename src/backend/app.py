@@ -6,8 +6,7 @@ from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi_utils.tasks import repeat_every
-import asyncio
-import json
+import logging
 
 from .config import settings
 from .models import init_database
@@ -18,12 +17,16 @@ from .crud import (
     create_user, get_user_by_username, get_users,
     create_project, get_project, get_projects, get_user_projects,
     create_mljob, get_mljob, get_mljobs, get_project_mljobs, get_user_mljobs,
-    update_mljob_status, sync_mljob_status
+    update_mljob_status
 )
 from .security import (
     authenticate_user, create_access_token,
     get_current_active_user
 )
+from .sync import sync_job_status, cleanup_resources
+
+# 配置日志
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -49,84 +52,21 @@ init_database(
 # 定时任务
 @app.on_event("startup")
 @repeat_every(seconds=settings.K8S_SYNC_INTERVAL)
-async def sync_job_status():
+async def sync_jobs():
     """定期从Kubernetes同步MLJob状态"""
     try:
-        # 分批同步以避免超时
-        with db_session:
-            active_jobs = select(j for j in MLJob if j.status not in ["Succeeded", "Failed", "Deleted"])
-            for i in range(0, len(active_jobs), settings.SYNC_BATCH_SIZE):
-                batch = active_jobs[i:i + settings.SYNC_BATCH_SIZE]
-                for job in batch:
-                    try:
-                        sync_mljob_status()
-                    except Exception as e:
-                        logger.error(f"Failed to sync job {job.job_id}: {str(e)}")
-                        # 更新错误计数
-                        job.sync_errors = (job.sync_errors or 0) + 1
-                        # 如果错误次数超过阈值，标记为失败
-                        if job.sync_errors >= settings.SYNC_ERROR_THRESHOLD:
-                            job.status = "failed"
-                            job.message = f"Failed to sync status after {job.sync_errors} attempts"
+        logger.info("Starting job status synchronization")
+        sync_job_status()
     except Exception as e:
         logger.error(f"Failed to sync job status: {str(e)}")
 
 @app.on_event("startup")
 @repeat_every(seconds=settings.RESOURCE.cleanup_interval)
-async def cleanup_resources():
+async def cleanup_jobs():
     """定期清理过期资源"""
     try:
-        with db_session:
-            # 1. 清理已完成的旧任务
-            cutoff_date = datetime.utcnow() - timedelta(days=settings.RESOURCE.max_job_age)
-            old_jobs = select(j for j in MLJob 
-                            if j.status in ["Succeeded", "Failed", "Deleted"]
-                            and j.updated_at < cutoff_date)
-            
-            for job in old_jobs:
-                try:
-                    # 删除k8s资源
-                    delete_k8s_mljob(job.name, job.namespace)
-                except Exception as e:
-                    logger.error(f"Failed to delete k8s resource for job {job.job_id}: {str(e)}")
-                # 删除数据库记录
-                job.delete()
-            
-            # 2. 检查资源一致性
-            active_jobs = select(j for j in MLJob 
-                               if j.status not in ["Succeeded", "Failed", "Deleted"])
-            
-            for job in active_jobs:
-                try:
-                    # 检查k8s资源是否存在
-                    k8s_jobs = k8s_api.list_namespaced_custom_object(
-                        group=settings.K8S_GROUP,
-                        version=settings.K8S_VERSION,
-                        namespace=job.namespace,
-                        plural=settings.K8S_PLURAL,
-                        label_selector=f"job-id={job.job_id}"
-                    )
-                    
-                    if not k8s_jobs.get("items"):
-                        # k8s资源不存在，尝试重建
-                        if job.sync_errors and job.sync_errors >= settings.SYNC_ERROR_THRESHOLD:
-                            # 如果已经多次失败，标记为错误
-                            job.status = "failed"
-                            job.message = "Kubernetes resource lost and recreation failed"
-                        else:
-                            # 尝试重建资源
-                            k8s_spec = json.loads(job.training)
-                            create_k8s_mljob(
-                                name=job.name,
-                                namespace=job.namespace,
-                                job_id=job.job_id,
-                                spec=k8s_spec
-                            )
-                            job.sync_errors = (job.sync_errors or 0) + 1
-                            
-                except Exception as e:
-                    logger.error(f"Failed to check resource consistency for job {job.job_id}: {str(e)}")
-                    
+        logger.info("Starting resource cleanup")
+        cleanup_resources()
     except Exception as e:
         logger.error(f"Failed to cleanup resources: {str(e)}")
 

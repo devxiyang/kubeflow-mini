@@ -25,44 +25,6 @@ except:
 # Kubernetes API客户端
 k8s_api = client.CustomObjectsApi()
 
-def create_k8s_mljob(name: str, namespace: str, job_id: str, spec: dict) -> dict:
-    """在Kubernetes中创建MLJob资源
-    
-    Args:
-        name: 资源名称
-        namespace: 命名空间
-        job_id: 任务ID
-        spec: MLJob规格
-        
-    Returns:
-        dict: 创建的资源对象
-    """
-    try:
-        body = {
-            "apiVersion": f"{settings.K8S_GROUP}/{settings.K8S_VERSION}",
-            "kind": "MLJob",
-            "metadata": {
-                "name": name,
-                "namespace": namespace,
-                "labels": {
-                    "job-id": job_id,
-                    "created-by": "kubeflow-mini"
-                }
-            },
-            "spec": spec
-        }
-        
-        return k8s_api.create_namespaced_custom_object(
-            group=settings.K8S_GROUP,
-            version=settings.K8S_VERSION,
-            namespace=namespace,
-            plural=settings.K8S_PLURAL,
-            body=body
-        )
-    except ApiException as e:
-        logger.error(f"Failed to create MLJob in Kubernetes: {str(e)}")
-        raise
-
 def update_k8s_mljob(name: str, namespace: str, spec: dict) -> dict:
     """在Kubernetes中更新MLJob资源
     
@@ -96,26 +58,6 @@ def update_k8s_mljob(name: str, namespace: str, spec: dict) -> dict:
     except ApiException as e:
         logger.error(f"Failed to update MLJob in Kubernetes: {str(e)}")
         raise
-
-def delete_k8s_mljob(name: str, namespace: str):
-    """在Kubernetes中删除MLJob资源
-    
-    Args:
-        name: 资源名称
-        namespace: 命名空间
-    """
-    try:
-        k8s_api.delete_namespaced_custom_object(
-            group=settings.K8S_GROUP,
-            version=settings.K8S_VERSION,
-            namespace=namespace,
-            plural=settings.K8S_PLURAL,
-            name=name
-        )
-    except ApiException as e:
-        if e.status != 404:  # 忽略已删除的资源
-            logger.error(f"Failed to delete MLJob in Kubernetes: {str(e)}")
-            raise
 
 def create_k8s_project(name: str, namespace: str, spec: dict) -> dict:
     """在Kubernetes中创建Project资源"""
@@ -164,88 +106,6 @@ def create_k8s_owner(name: str, namespace: str, spec: dict) -> dict:
     except ApiException as e:
         logger.error(f"Failed to create Owner in Kubernetes: {str(e)}")
         raise
-
-def sync_mljob_status():
-    """从Kubernetes同步MLJob状态
-    
-    1. 同步活跃任务的状态
-    2. 对于error状态的任务,尝试重新创建k8s资源
-    """
-    try:
-        with db_session:
-            # 1. 获取需要同步状态的任务
-            active_jobs = select(j for j in MLJob if j.status not in ["Succeeded", "Failed", "Deleted"])[:]
-            
-            for job in active_jobs:
-                try:
-                    # 2. 检查是否需要创建k8s资源
-                    if job.status == "error":
-                        try:
-                            k8s_spec = {
-                                "project": job.project.name,
-                                "owner": job.user.username,
-                                "description": job.description,
-                                "training": json.loads(job.training_status) if job.training_status else {}
-                            }
-                            
-                            create_k8s_mljob(
-                                name=job.name,
-                                namespace=job.namespace,
-                                job_id=job.job_id,
-                                spec=k8s_spec
-                            )
-                            
-                            # 创建成功,更新状态
-                            job.status = "pending"
-                            job.message = "Kubernetes resource created"
-                            job.updated_at = datetime.utcnow()
-                            continue
-                            
-                        except Exception as e:
-                            logger.error(f"Failed to recreate Kubernetes resource for job {job.job_id}: {str(e)}")
-                            continue
-                    
-                    # 3. 同步现有资源的状态
-                    k8s_jobs = k8s_api.list_namespaced_custom_object(
-                        group=settings.K8S_GROUP,
-                        version=settings.K8S_VERSION,
-                        namespace=job.namespace,
-                        plural=settings.K8S_PLURAL,
-                        label_selector=f"job-id={job.job_id}"
-                    )
-                    
-                    if not k8s_jobs.get("items"):
-                        # 资源不存在,标记为error以便下次重试
-                        job.status = "error"
-                        job.message = "Resource not found in Kubernetes"
-                        job.updated_at = datetime.utcnow()
-                        continue
-                        
-                    k8s_job = k8s_jobs["items"][0]
-                    status = k8s_job.get("status", {})
-                    
-                    # 更新状态
-                    job.status = status.get("phase", "Unknown")
-                    job.message = status.get("message")
-                    job.updated_at = datetime.utcnow()
-                    
-                    # 更新时间戳
-                    if status.get("start_time") and not job.started_at:
-                        job.started_at = datetime.fromisoformat(status["start_time"].rstrip("Z"))
-                    if status.get("completion_time"):
-                        job.completed_at = datetime.fromisoformat(status["completion_time"].rstrip("Z"))
-                        
-                    # 更新训练状态
-                    if "training_status" in status:
-                        job.training_status = json.dumps(status["training_status"])
-                        
-                except ApiException as e:
-                    logger.error(f"Failed to sync MLJob status for {job.namespace}/{job.name}: {str(e)}")
-                except Exception as e:
-                    logger.error(f"Error syncing MLJob {job.namespace}/{job.name}: {str(e)}")
-                    
-    except Exception as e:
-        logger.error(f"Failed to sync MLJob status: {str(e)}")
 
 # User operations
 @db_session
