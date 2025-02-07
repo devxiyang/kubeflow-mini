@@ -2,8 +2,10 @@
 
 import logging
 import kopf
-from kubernetes import client, config
+from kubernetes import client, config, watch
+from kubernetes.client.rest import ApiException
 from datetime import datetime
+from typing import Dict, Any, Optional
 
 from .config import settings
 from .models import MLJob, MLJobStatus
@@ -12,100 +14,195 @@ from .utils import create_training_job, delete_training_job, get_training_job_st
 # 配置日志
 logger = logging.getLogger(__name__)
 
+# Finalizer名称
+FINALIZER = f"{settings.GROUP}/cleanup"
+
 # ===================== MLJob 处理器 =====================
 
 @kopf.on.create(settings.GROUP, settings.VERSION, settings.PLURAL)
-def create_mljob(spec, meta, status, **kwargs):
+def create_mljob(spec: Dict[str, Any], meta: Dict[str, Any], status: Dict[str, Any], **kwargs):
     """处理MLJob创建事件"""
     try:
-        # 解析MLJob
+        # 获取资源信息
         name = meta.get("name")
         namespace = meta.get("namespace", "default")
         logger.info(f"Creating MLJob {namespace}/{name}")
-        
+
+        # 验证规格
+        if not _validate_mljob_spec(spec):
+            raise kopf.PermanentError("Invalid MLJob specification")
+
+        # 检查项目配额
+        if not _check_project_quota(namespace, spec):
+            raise kopf.PermanentError("Project quota exceeded")
+
         # 创建对应的Training Job
-        job = create_training_job(name, namespace, spec)
-        
-        # 更新状态
+        try:
+            job = create_training_job(name, namespace, spec)
+        except ApiException as e:
+            if e.status == 409:  # Conflict
+                raise kopf.TemporaryError("Resource conflict, retrying...", delay=10)
+            raise kopf.PermanentError(f"Failed to create training job: {e}")
+        except Exception as e:
+            raise kopf.PermanentError(f"Failed to create training job: {e}")
+
+        # 返回状态
         return {
             "phase": settings.JOB_PHASES["CREATED"],
-            "message": "Created training job",
-            "start_time": datetime.utcnow().isoformat() + "Z"
+            "message": "Created training job successfully",
+            "start_time": datetime.utcnow().isoformat() + "Z",
+            "observed_generation": meta.get("generation", 1)
         }
-    except Exception as e:
-        logger.error(f"Failed to create MLJob {namespace}/{name}: {str(e)}")
+
+    except kopf.PermanentError as e:
+        logger.error(f"Permanent error creating MLJob {namespace}/{name}: {str(e)}")
         return {
             "phase": settings.JOB_PHASES["FAILED"],
-            "message": f"Failed to create training job: {str(e)}",
-            "reason": "CreateError"
+            "message": str(e),
+            "reason": "CreateError",
+            "observed_generation": meta.get("generation", 1)
+        }
+    except kopf.TemporaryError as e:
+        logger.warning(f"Temporary error creating MLJob {namespace}/{name}: {str(e)}")
+        raise
+    except Exception as e:
+        logger.exception(f"Unexpected error creating MLJob {namespace}/{name}")
+        return {
+            "phase": settings.JOB_PHASES["FAILED"],
+            "message": f"Unexpected error: {str(e)}",
+            "reason": "InternalError",
+            "observed_generation": meta.get("generation", 1)
         }
 
 @kopf.on.update(settings.GROUP, settings.VERSION, settings.PLURAL)
-def update_mljob(spec, meta, status, old, new, diff, **kwargs):
+def update_mljob(spec: Dict[str, Any], meta: Dict[str, Any], status: Dict[str, Any], 
+                 old: Dict[str, Any], new: Dict[str, Any], diff, **kwargs):
     """处理MLJob更新事件"""
     try:
+        # 获取资源信息
         name = meta.get("name")
         namespace = meta.get("namespace", "default")
         logger.info(f"Updating MLJob {namespace}/{name}")
-        
-        # 检查Training配置是否变更
-        if "training" in diff:
-            # 删除旧的Training Job
-            delete_training_job(name, namespace, old["spec"])
-            # 创建新的Training Job
-            job = create_training_job(name, namespace, new["spec"])
-            
+
+        # 验证新规格
+        if not _validate_mljob_spec(new["spec"]):
+            raise kopf.PermanentError("Invalid MLJob specification")
+
+        # 检查项目配额
+        if not _check_project_quota(namespace, new["spec"]):
+            raise kopf.PermanentError("Project quota exceeded")
+
+        # 检查是否需要更新Training Job
+        if _should_update_training_job(old["spec"], new["spec"]):
+            try:
+                # 删除旧的Training Job
+                delete_training_job(name, namespace, old["spec"])
+                # 创建新的Training Job
+                job = create_training_job(name, namespace, new["spec"])
+            except ApiException as e:
+                if e.status == 409:  # Conflict
+                    raise kopf.TemporaryError("Resource conflict, retrying...", delay=10)
+                raise kopf.PermanentError(f"Failed to update training job: {e}")
+            except Exception as e:
+                raise kopf.PermanentError(f"Failed to update training job: {e}")
+
             return {
                 "phase": settings.JOB_PHASES["CREATED"],
-                "message": "Recreated training job",
-                "start_time": datetime.utcnow().isoformat() + "Z"
+                "message": "Recreated training job successfully",
+                "start_time": datetime.utcnow().isoformat() + "Z",
+                "observed_generation": meta.get("generation", 1)
             }
-    except Exception as e:
-        logger.error(f"Failed to update MLJob {namespace}/{name}: {str(e)}")
+
+    except kopf.PermanentError as e:
+        logger.error(f"Permanent error updating MLJob {namespace}/{name}: {str(e)}")
         return {
             "phase": settings.JOB_PHASES["FAILED"],
-            "message": f"Failed to update training job: {str(e)}",
-            "reason": "UpdateError"
+            "message": str(e),
+            "reason": "UpdateError",
+            "observed_generation": meta.get("generation", 1)
+        }
+    except kopf.TemporaryError as e:
+        logger.warning(f"Temporary error updating MLJob {namespace}/{name}: {str(e)}")
+        raise
+    except Exception as e:
+        logger.exception(f"Unexpected error updating MLJob {namespace}/{name}")
+        return {
+            "phase": settings.JOB_PHASES["FAILED"],
+            "message": f"Unexpected error: {str(e)}",
+            "reason": "InternalError",
+            "observed_generation": meta.get("generation", 1)
         }
 
 @kopf.on.delete(settings.GROUP, settings.VERSION, settings.PLURAL)
-def delete_mljob(spec, meta, status, **kwargs):
+def delete_mljob(spec: Dict[str, Any], meta: Dict[str, Any], status: Dict[str, Any], **kwargs):
     """处理MLJob删除事件"""
     try:
+        # 获取资源信息
         name = meta.get("name")
         namespace = meta.get("namespace", "default")
         logger.info(f"Deleting MLJob {namespace}/{name}")
-        
-        # 删除Training Job
-        delete_training_job(name, namespace, spec)
-        
+
+        try:
+            # 删除Training Job
+            delete_training_job(name, namespace, spec)
+        except ApiException as e:
+            if e.status == 404:  # Not found
+                logger.info(f"Training job for {namespace}/{name} already deleted")
+            else:
+                raise kopf.PermanentError(f"Failed to delete training job: {e}")
+        except Exception as e:
+            raise kopf.PermanentError(f"Failed to delete training job: {e}")
+
         return {
             "phase": settings.JOB_PHASES["DELETED"],
-            "message": "Deleted training job",
+            "message": "Deleted training job successfully",
             "completion_time": datetime.utcnow().isoformat() + "Z"
         }
-    except Exception as e:
-        logger.error(f"Failed to delete MLJob {namespace}/{name}: {str(e)}")
+
+    except kopf.PermanentError as e:
+        logger.error(f"Permanent error deleting MLJob {namespace}/{name}: {str(e)}")
         return {
             "phase": settings.JOB_PHASES["FAILED"],
-            "message": f"Failed to delete training job: {str(e)}",
+            "message": str(e),
             "reason": "DeleteError"
+        }
+    except Exception as e:
+        logger.exception(f"Unexpected error deleting MLJob {namespace}/{name}")
+        return {
+            "phase": settings.JOB_PHASES["FAILED"],
+            "message": f"Unexpected error: {str(e)}",
+            "reason": "InternalError"
         }
 
 @kopf.timer(settings.GROUP, settings.VERSION, settings.PLURAL, interval=30.0)
-def reconcile_mljob(spec, meta, status, **kwargs):
+def reconcile_mljob(spec: Dict[str, Any], meta: Dict[str, Any], status: Dict[str, Any], **kwargs):
     """定期调谐MLJob状态"""
     try:
+        # 获取资源信息
         name = meta.get("name")
         namespace = meta.get("namespace", "default")
         logger.debug(f"Reconciling MLJob {namespace}/{name}")
-        
-        # 获取Training Job状态
-        training_status = get_training_job_status(name, namespace, spec)
+
+        # 检查Training Job状态
+        try:
+            training_status = get_training_job_status(name, namespace, spec)
+        except ApiException as e:
+            if e.status == 404:  # Not found
+                # Training Job不存在,可能需要重建
+                logger.warning(f"Training job for {namespace}/{name} not found")
+                return {
+                    "phase": settings.JOB_PHASES["FAILED"],
+                    "message": "Training job not found",
+                    "reason": "NotFound"
+                }
+            raise kopf.TemporaryError(f"Failed to get training job status: {e}", delay=30)
+        except Exception as e:
+            raise kopf.TemporaryError(f"Failed to get training job status: {e}", delay=30)
+
         if not training_status:
             return
-            
-        # 更新MLJob状态
+
+        # 更新状态
         phase = training_status.get("phase", settings.JOB_PHASES["RUNNING"])
         return {
             "phase": phase,
@@ -115,10 +212,15 @@ def reconcile_mljob(spec, meta, status, **kwargs):
                 datetime.utcnow().isoformat() + "Z"
                 if phase in [settings.JOB_PHASES["SUCCEEDED"], settings.JOB_PHASES["FAILED"]]
                 else None
-            )
+            ),
+            "observed_generation": meta.get("generation", 1)
         }
+
+    except kopf.TemporaryError as e:
+        logger.warning(f"Temporary error reconciling MLJob {namespace}/{name}: {str(e)}")
+        raise
     except Exception as e:
-        logger.error(f"Failed to reconcile MLJob {namespace}/{name}: {str(e)}")
+        logger.exception(f"Unexpected error reconciling MLJob {namespace}/{name}")
         # 不更新状态,等待下次重试
 
 # ===================== Project 处理器 =====================
@@ -425,4 +527,103 @@ def _delete_owner_resources(owner_name, namespace):
         # MLJobs会通过级联删除自动删除
     except Exception as e:
         logger.error(f"Failed to delete owner resources: {str(e)}")
-        raise 
+        raise
+
+def _validate_mljob_spec(spec: Dict[str, Any]) -> bool:
+    """验证MLJob规格"""
+    try:
+        # 验证必需字段
+        required_fields = ["job_id", "project", "owner", "training"]
+        if not all(field in spec for field in required_fields):
+            return False
+
+        # 验证training配置
+        training = spec.get("training", {})
+        if not all(field in training for field in ["api_version", "kind", "spec"]):
+            return False
+
+        # 验证资源请求
+        if "spec" in training:
+            if not _validate_resource_requests(training["spec"]):
+                return False
+
+        return True
+    except Exception:
+        return False
+
+def _validate_resource_requests(spec: Dict[str, Any]) -> bool:
+    """验证资源请求"""
+    try:
+        # 验证CPU和内存请求
+        for replica_spec in spec.values():
+            if isinstance(replica_spec, dict):
+                template = replica_spec.get("template", {})
+                containers = template.get("spec", {}).get("containers", [])
+                for container in containers:
+                    resources = container.get("resources", {})
+                    requests = resources.get("requests", {})
+                    if not all(k in requests for k in ["cpu", "memory"]):
+                        return False
+        return True
+    except Exception:
+        return False
+
+def _check_project_quota(namespace: str, spec: Dict[str, Any]) -> bool:
+    """检查项目配额"""
+    try:
+        project_name = spec.get("project")
+        if not project_name:
+            return False
+
+        # 获取项目配额
+        api = client.CustomObjectsApi()
+        project = api.get_namespaced_custom_object(
+            group=settings.GROUP,
+            version=settings.VERSION,
+            namespace=namespace,
+            plural="projects",
+            name=project_name
+        )
+
+        quotas = project.get("spec", {}).get("quotas", {})
+        if not quotas:
+            return False
+
+        # 获取项目当前使用量
+        current_jobs = api.list_namespaced_custom_object(
+            group=settings.GROUP,
+            version=settings.VERSION,
+            namespace=namespace,
+            plural=settings.PLURAL,
+            label_selector=f"project={project_name}"
+        )
+
+        # 检查配额
+        job_count = len(current_jobs.get("items", []))
+        if job_count >= quotas.get("max_jobs", 0):
+            return False
+
+        return True
+    except ApiException as e:
+        if e.status == 404:  # Project not found
+            return False
+        raise
+    except Exception:
+        return False
+
+def _should_update_training_job(old_spec: Dict[str, Any], new_spec: Dict[str, Any]) -> bool:
+    """检查是否需要更新Training Job"""
+    try:
+        old_training = old_spec.get("training", {})
+        new_training = new_spec.get("training", {})
+        
+        # 检查关键字段
+        fields_to_check = ["api_version", "kind", "spec"]
+        for field in fields_to_check:
+            if old_training.get(field) != new_training.get(field):
+                return True
+                
+        return False
+    except Exception:
+        # 如果出现异常,为安全起见返回True
+        return True 
