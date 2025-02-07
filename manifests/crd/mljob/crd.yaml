@@ -1,0 +1,104 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: mljobs.kubeflow-mini.io
+spec:
+  group: kubeflow-mini.io
+  names:
+    kind: MLJob
+    listKind: MLJobList
+    plural: mljobs
+    singular: mljob
+    shortNames:
+      - mlj
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - jsonPath: .spec.projectRef
+          name: Project
+          type: string
+        - jsonPath: .spec.ownerRef
+          name: Owner
+          type: string
+        - jsonPath: .status.phase
+          name: Status
+          type: string
+        - jsonPath: .metadata.creationTimestamp
+          name: Age
+          type: date
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: ["spec"]
+          properties:
+            spec:
+              type: object
+              required: ["projectRef", "ownerRef", "training"]
+              properties:
+                projectRef:
+                  type: string
+                  description: "Reference to the Project resource"
+                ownerRef:
+                  type: string
+                  description: "Reference to the Owner resource"
+                training:
+                  type: object
+                  description: "Training job specification"
+                  required: ["apiVersion", "kind", "spec"]
+                  properties:
+                    apiVersion:
+                      type: string
+                      description: "API version of the training operator"
+                    kind:
+                      type: string
+                      description: "Kind of the training job (e.g. TFJob, PyTorchJob)"
+                    spec:
+                      type: object
+                      description: "Training job specification following the training operator schema"
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: "Current phase of the MLJob"
+                  enum: ["Pending", "Running", "Succeeded", "Failed", "Unknown"]
+                startTime:
+                  type: string
+                  format: date-time
+                completionTime:
+                  type: string
+                  format: date-time
+                resourceUsage:
+                  type: object
+                  properties:
+                    gpu:
+                      type: integer
+                    cpu:
+                      type: string
+                    memory:
+                      type: string
+                    storage:
+                      type: string
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: ["type", "status"]
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+      subresources:
+        status: {} 

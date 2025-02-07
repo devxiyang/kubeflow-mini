@@ -1,0 +1,47 @@
+# 重试策略配置
+retry:
+  # 默认重试配置
+  default:
+    max_retries: 3
+    delay: 1
+  # 按操作类型的重试配置
+  operations:
+    create:
+      max_retries: 3
+      delay: 2
+      description: "创建操作重试配置"
+    delete:
+      max_retries: 5
+      delay: 1
+      description: "删除操作重试配置"
+    update:
+      max_retries: 3
+      delay: 2
+      description: "更新操作重试配置"
+    get:
+      max_retries: 3
+      delay: 1
+      description: "获取操作重试配置"
+
+# 日志配置
+logging:
+  level: INFO
+  format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+
+# API配置
+api:
+  group: "kubeflow-mini.io"
+  version: "v1"
+  plural: "mljobs"
+
+# 状态配置
+status:
+  phases:
+    - Created
+    - Running
+    - Failed
+    - Succeeded
+    - Deleted
+  conditions:
+    default_status: "True"
+    time_format: "%Y-%m-%dT%H:%M:%SZ" 

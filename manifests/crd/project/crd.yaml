@@ -1,0 +1,121 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: projects.kubeflow-mini.io
+spec:
+  group: kubeflow-mini.io
+  names:
+    kind: Project
+    listKind: ProjectList
+    plural: projects
+    singular: project
+    shortNames:
+      - proj
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - jsonPath: .spec.displayName
+          name: Display Name
+          type: string
+        - jsonPath: .status.phase
+          name: Status
+          type: string
+        - jsonPath: .metadata.creationTimestamp
+          name: Age
+          type: date
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: ["spec"]
+          properties:
+            spec:
+              type: object
+              required: ["displayName", "quota"]
+              properties:
+                displayName:
+                  type: string
+                  description: "Display name of the project"
+                description:
+                  type: string
+                  description: "Project description"
+                quota:
+                  type: object
+                  description: "Resource quota configuration"
+                  required: ["gpu", "cpu", "memory", "storage", "maxJobs"]
+                  properties:
+                    gpu:
+                      type: object
+                      required: ["limit"]
+                      properties:
+                        limit:
+                          type: integer
+                          minimum: 0
+                    cpu:
+                      type: object
+                      required: ["limit"]
+                      properties:
+                        limit:
+                          type: string
+                          pattern: "^[0-9]+(\\.[0-9]+)?[m]?$"
+                    memory:
+                      type: object
+                      required: ["limit"]
+                      properties:
+                        limit:
+                          type: string
+                          pattern: "^[0-9]+(\\.[0-9]+)?([KMGTPE]i?)?$"
+                    storage:
+                      type: object
+                      required: ["limit"]
+                      properties:
+                        limit:
+                          type: string
+                          pattern: "^[0-9]+(\\.[0-9]+)?([KMGTPE]i?)?$"
+                    maxJobs:
+                      type: integer
+                      minimum: 0
+                      description: "Maximum number of concurrent jobs allowed"
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: "Current phase of the project"
+                  enum: ["Active", "Inactive", "Terminating"]
+                usage:
+                  type: object
+                  description: "Current resource usage"
+                  properties:
+                    gpu:
+                      type: integer
+                    cpu:
+                      type: string
+                    memory:
+                      type: string
+                    storage:
+                      type: string
+                    currentJobs:
+                      type: integer
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: ["type", "status"]
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+      subresources:
+        status: {} 
