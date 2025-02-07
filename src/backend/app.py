@@ -5,6 +5,8 @@ from typing import List
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi_utils.tasks import repeat_every
+import asyncio
 
 from .config import settings
 from .models import init_database
@@ -15,7 +17,7 @@ from .crud import (
     create_user, get_user_by_username, get_users,
     create_project, get_project, get_projects, get_user_projects,
     create_mljob, get_mljob, get_mljobs, get_project_mljobs, get_user_mljobs,
-    update_mljob_status
+    update_mljob_status, sync_mljob_status
 )
 from .security import (
     authenticate_user, create_access_token,
@@ -42,6 +44,16 @@ init_database(
     provider=settings.DATABASE_PROVIDER,
     filename=settings.DATABASE_FILENAME
 )
+
+# 定时同步任务
+@app.on_event("startup")
+@repeat_every(seconds=30)  # 每30秒同步一次
+async def sync_job_status():
+    """定时从Kubernetes同步MLJob状态"""
+    try:
+        sync_mljob_status()
+    except Exception as e:
+        logger.error(f"Failed to sync job status: {str(e)}")
 
 # 认证路由
 @app.post("/token", response_model=Token)

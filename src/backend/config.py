@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     DATABASE_PASSWORD: Optional[str] = None
     DATABASE_NAME: Optional[str] = None
     
+    # Kubernetes配置
+    K8S_GROUP: str = "kubeflow-mini.io"
+    K8S_VERSION: str = "v1"
+    K8S_PLURAL: str = "mljobs"
+    K8S_SYNC_INTERVAL: int = 30  # 状态同步间隔(秒)
+    
     class Config:
         case_sensitive = True
         env_file = ".env"
