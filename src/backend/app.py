@@ -24,6 +24,7 @@ from .security import (
     get_current_active_user
 )
 from .sync import sync_job_status, cleanup_resources
+from .stats import get_project_stats
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -150,6 +151,26 @@ async def read_project(
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
+
+@app.get("/projects/{project_id}/stats")
+async def read_project_stats(
+    project_id: int,
+    current_user: User = Depends(get_current_active_user)
+):
+    """获取项目资源统计信息"""
+    project = get_project(project_id=project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+        
+    # 检查权限
+    if project.owner.id != current_user.id and current_user.role != "admin":
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+        
+    stats = get_project_stats(project_id)
+    if not stats:
+        raise HTTPException(status_code=500, detail="Failed to get project stats")
+        
+    return stats
 
 # ML任务路由
 @app.post("/mljobs/", response_model=MLJob)
