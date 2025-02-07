@@ -28,6 +28,10 @@ def configure(settings: kopf.OperatorSettings, **_):
     # 配置调谐间隔
     settings.scanning.period = settings.RECONCILE.interval
 
+def _get_namespace(project: str) -> str:
+    """获取项目对应的namespace名称"""
+    return f"project-{project}"
+
 @kopf.on.create(settings.GROUP, settings.VERSION, settings.PLURAL)
 def create_mljob(spec: Dict[str, Any], meta: Dict[str, Any], **kwargs):
     """处理MLJob创建事件
@@ -43,7 +47,7 @@ def create_mljob(spec: Dict[str, Any], meta: Dict[str, Any], **kwargs):
         if not project:
             raise kopf.PermanentError("Project name is required")
             
-        namespace = project  # 使用项目名称作为namespace
+        namespace = _get_namespace(project)  # 使用project-前缀
         logger.info(f"Creating MLJob {namespace}/{name}")
 
         # 验证和检查
@@ -100,7 +104,7 @@ def update_mljob(spec: Dict[str, Any], meta: Dict[str, Any],
         if not project:
             raise kopf.PermanentError("Project name is required")
             
-        namespace = project  # 使用项目名称作为namespace
+        namespace = _get_namespace(project)  # 使用project-前缀
         logger.info(f"Updating MLJob {namespace}/{name}")
 
         # 验证和检查
@@ -154,7 +158,7 @@ def delete_mljob(spec: Dict[str, Any], meta: Dict[str, Any], **kwargs):
         if not project:
             raise kopf.PermanentError("Project name is required")
             
-        namespace = project  # 使用项目名称作为namespace
+        namespace = _get_namespace(project)  # 使用project-前缀
         logger.info(f"Deleting MLJob {namespace}/{name}")
 
         # 删除Training Job
@@ -198,7 +202,7 @@ def reconcile_mljob(spec: Dict[str, Any], meta: Dict[str, Any], status: Dict[str
         if not project:
             raise kopf.PermanentError("Project name is required")
             
-        namespace = project  # 使用项目名称作为namespace
+        namespace = _get_namespace(project)  # 使用project-前缀
         logger.debug(f"Reconciling MLJob {namespace}/{name}")
 
         # 检查资源年龄
@@ -291,7 +295,7 @@ def resume_mljob(spec: Dict[str, Any], meta: Dict[str, Any], status: Dict[str, A
         if not project:
             raise kopf.PermanentError("Project name is required")
             
-        namespace = project  # 使用项目名称作为namespace
+        namespace = _get_namespace(project)  # 使用project-前缀
         logger.info(f"Resuming MLJob {namespace}/{name}")
         
         # 检查Training Job是否存在

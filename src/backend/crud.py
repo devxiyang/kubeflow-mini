@@ -2,7 +2,7 @@
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 from pony.orm import db_session, select
 from kubernetes import client, config
@@ -570,48 +570,59 @@ def delete_notebook(notebook_id: int):
 
 @db_session
 def start_notebook(notebook_id: int) -> Notebook:
-    """启动Notebook"""
+    """启动Notebook
+    
+    同时:
+    1. 创建Kubernetes资源
+    2. 启动租约计时
+    """
     try:
-        # 1. 获取数据库记录
         db_notebook = Notebook.get(id=notebook_id)
         if not db_notebook:
             raise HTTPException(status_code=404, detail="Notebook not found")
             
-        # 2. 检查状态
-        if db_notebook.status == "running":
-            return db_notebook
+        # 检查租约状态
+        if db_notebook.lease_status == "expired":
+            raise HTTPException(status_code=400, detail="Notebook lease has expired")
             
-        # 3. 创建Kubernetes资源
-        service_name = f"notebook-{db_notebook.id}"
-        k8s_spec = {
-            "image": db_notebook.image,
-            "resources": {
-                "limits": {
-                    "nvidia.com/gpu": db_notebook.gpu_limit,
-                    "cpu": str(db_notebook.cpu_limit),
-                    "memory": db_notebook.memory_limit
-                },
-                "requests": {
-                    "cpu": str(db_notebook.cpu_limit / 2),
-                    "memory": _halve_memory(db_notebook.memory_limit)
-                }
-            },
-            "project": db_notebook.project.name,
-            "owner": db_notebook.user.username
-        }
-        
+        # 获取项目namespace
+        namespace = f"project-{db_notebook.project.name}"
+            
+        # 创建Kubernetes资源
         create_notebook_resources(
-            name=service_name,
-            namespace=db_notebook.project.name,
-            spec=k8s_spec
+            name=db_notebook.name,
+            namespace=namespace,
+            spec={
+                "image": db_notebook.image,
+                "resources": {
+                    "limits": {
+                        "nvidia.com/gpu": db_notebook.gpu_limit,
+                        "cpu": str(db_notebook.cpu_limit),
+                        "memory": db_notebook.memory_limit
+                    },
+                    "requests": {
+                        "nvidia.com/gpu": db_notebook.gpu_limit,
+                        "cpu": str(db_notebook.cpu_limit/2),
+                        "memory": _halve_memory(db_notebook.memory_limit)
+                    }
+                }
+            }
         )
         
-        # 4. 更新数据库记录
-        db_notebook.service_name = service_name
+        # 获取访问地址
+        endpoint = get_notebook_endpoint(db_notebook.name, namespace)
+        
+        # 更新状态
         db_notebook.status = "running"
+        db_notebook.message = "Notebook is running"
+        db_notebook.service_name = db_notebook.name
+        db_notebook.endpoint = endpoint
         db_notebook.started_at = datetime.utcnow()
-        db_notebook.stopped_at = None
-        db_notebook.message = None
+        db_notebook.updated_at = datetime.utcnow()
+        
+        # 启动租约
+        db_notebook.lease_start = datetime.utcnow()
+        db_notebook.lease_status = "active"
         
         return db_notebook
         
@@ -619,36 +630,39 @@ def start_notebook(notebook_id: int) -> Notebook:
         raise
     except Exception as e:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=500,
             detail=f"Failed to start notebook: {str(e)}"
         )
 
 @db_session
 def stop_notebook(notebook_id: int) -> Notebook:
-    """停止Notebook"""
+    """停止Notebook
+    
+    同时:
+    1. 删除Kubernetes资源
+    2. 暂停租约计时
+    """
     try:
-        # 1. 获取数据库记录
         db_notebook = Notebook.get(id=notebook_id)
         if not db_notebook:
             raise HTTPException(status_code=404, detail="Notebook not found")
             
-        # 2. 检查状态
-        if db_notebook.status == "stopped":
-            return db_notebook
+        # 获取项目namespace
+        namespace = f"project-{db_notebook.project.name}"
             
-        # 3. 删除Kubernetes资源
-        if db_notebook.service_name:
-            delete_notebook_resources(
-                name=db_notebook.service_name,
-                namespace=db_notebook.project.name
-            )
-            
-        # 4. 更新数据库记录
+        # 删除Kubernetes资源
+        delete_notebook_resources(db_notebook.name, namespace)
+        
+        # 更新状态
         db_notebook.status = "stopped"
-        db_notebook.stopped_at = datetime.utcnow()
+        db_notebook.message = "Notebook is stopped"
         db_notebook.service_name = None
         db_notebook.endpoint = None
-        db_notebook.message = None
+        db_notebook.stopped_at = datetime.utcnow()
+        db_notebook.updated_at = datetime.utcnow()
+        
+        # 暂停租约
+        db_notebook.lease_status = "inactive"
         
         return db_notebook
         
@@ -656,9 +670,66 @@ def stop_notebook(notebook_id: int) -> Notebook:
         raise
     except Exception as e:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=500,
             detail=f"Failed to stop notebook: {str(e)}"
         )
+
+@db_session
+def renew_notebook_lease(notebook_id: int) -> Notebook:
+    """续租Notebook"""
+    try:
+        db_notebook = Notebook.get(id=notebook_id)
+        if not db_notebook:
+            raise HTTPException(status_code=404, detail="Notebook not found")
+            
+        # 检查是否可以续租
+        if db_notebook.lease_renewal_count >= db_notebook.max_lease_renewals:
+            raise HTTPException(status_code=400, detail="Maximum lease renewals reached")
+            
+        # 检查当前租约状态
+        if db_notebook.lease_status != "active":
+            raise HTTPException(status_code=400, detail="Notebook lease is not active")
+            
+        # 续租
+        db_notebook.lease_start = datetime.utcnow()
+        db_notebook.lease_renewal_count += 1
+        db_notebook.updated_at = datetime.utcnow()
+        
+        return db_notebook
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to renew notebook lease: {str(e)}"
+        )
+
+@db_session
+def check_notebook_leases():
+    """检查所有Notebook租约状态"""
+    try:
+        # 获取所有运行中的notebook
+        active_notebooks = select(n for n in Notebook if n.status == "running" and n.lease_status == "active")[:]
+        
+        now = datetime.utcnow()
+        for notebook in active_notebooks:
+            if notebook.lease_start:
+                # 计算租约是否过期
+                lease_end = notebook.lease_start + timedelta(hours=notebook.lease_duration)
+                if now > lease_end:
+                    # 租约过期,停止notebook
+                    notebook.lease_status = "expired"
+                    notebook.message = "Lease expired"
+                    notebook.updated_at = now
+                    
+                    try:
+                        stop_notebook(notebook.id)
+                    except:
+                        logger.error(f"Failed to stop expired notebook {notebook.id}")
+                        
+    except Exception as e:
+        logger.error(f"Failed to check notebook leases: {str(e)}")
 
 @db_session
 def get_notebook(notebook_id: int) -> Optional[Notebook]:

@@ -4,6 +4,7 @@ import logging
 from typing import Dict, Any
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
+from fastapi import HTTPException
 
 from .config import settings
 
@@ -165,26 +166,22 @@ def _halve_memory(memory: str) -> str:
     except:
         return memory
 
-def create_notebook_resources(name: str, namespace: str, spec: Dict[str, Any]):
+def create_notebook_resources(name: str, namespace: str, spec: Dict[str, Any]) -> None:
     """创建Notebook相关的Kubernetes资源
     
-    创建:
-    1. Deployment - 运行Notebook服务器
-    2. Service - 暴露Notebook服务
+    Args:
+        name: Notebook名称
+        namespace: 项目namespace
+        spec: Notebook配置
     """
     try:
-        # 1. 创建Deployment
+        # 创建deployment
         deployment = {
             "apiVersion": "apps/v1",
             "kind": "Deployment",
             "metadata": {
                 "name": name,
-                "namespace": namespace,
-                "labels": {
-                    "app": name,
-                    "component": "notebook",
-                    "created-by": "kubeflow-mini"
-                }
+                "namespace": namespace
             },
             "spec": {
                 "replicas": 1,
@@ -204,16 +201,9 @@ def create_notebook_resources(name: str, namespace: str, spec: Dict[str, Any]):
                             "name": "notebook",
                             "image": spec["image"],
                             "ports": [{
-                                "containerPort": 8888,
-                                "name": "notebook"
+                                "containerPort": 8888
                             }],
-                            "resources": spec["resources"],
-                            "env": [
-                                {
-                                    "name": "JUPYTER_ENABLE_LAB",
-                                    "value": "yes"
-                                }
-                            ]
+                            "resources": spec["resources"]
                         }]
                     }
                 }
@@ -225,30 +215,23 @@ def create_notebook_resources(name: str, namespace: str, spec: Dict[str, Any]):
             body=deployment
         )
         
-        # 2. 创建Service
+        # 创建service
         service = {
             "apiVersion": "v1",
             "kind": "Service",
             "metadata": {
                 "name": name,
-                "namespace": namespace,
-                "labels": {
-                    "app": name,
-                    "component": "notebook",
-                    "created-by": "kubeflow-mini"
-                }
+                "namespace": namespace
             },
             "spec": {
-                "type": "ClusterIP",
-                "ports": [{
-                    "port": 8888,
-                    "targetPort": 8888,
-                    "protocol": "TCP",
-                    "name": "notebook"
-                }],
                 "selector": {
                     "app": name
-                }
+                },
+                "ports": [{
+                    "port": 8888,
+                    "targetPort": 8888
+                }],
+                "type": "ClusterIP"
             }
         }
         
@@ -258,8 +241,11 @@ def create_notebook_resources(name: str, namespace: str, spec: Dict[str, Any]):
         )
         
     except ApiException as e:
-        logger.error(f"Failed to create Kubernetes resources: {str(e)}")
-        raise
+        logger.error(f"Failed to create notebook resources: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create notebook resources: {str(e)}"
+        )
 
 def update_notebook_resources(name: str, namespace: str, spec: Dict[str, Any]):
     """更新Notebook相关的Kubernetes资源"""
@@ -283,52 +269,62 @@ def update_notebook_resources(name: str, namespace: str, spec: Dict[str, Any]):
         logger.error(f"Failed to update Kubernetes resources: {str(e)}")
         raise
 
-def delete_notebook_resources(name: str, namespace: str):
-    """删除Notebook相关的Kubernetes资源"""
+def delete_notebook_resources(name: str, namespace: str) -> None:
+    """删除Notebook相关的Kubernetes资源
+    
+    Args:
+        name: Notebook名称
+        namespace: 项目namespace
+    """
     try:
-        # 删除Deployment
-        try:
-            apps_api.delete_namespaced_deployment(
-                name=name,
-                namespace=namespace
-            )
-        except ApiException as e:
-            if e.status != 404:  # 忽略不存在的资源
-                raise
-                
-        # 删除Service
-        try:
-            core_api.delete_namespaced_service(
-                name=name,
-                namespace=namespace
-            )
-        except ApiException as e:
-            if e.status != 404:  # 忽略不存在的资源
-                raise
-                
+        # 删除deployment
+        apps_api.delete_namespaced_deployment(
+            name=name,
+            namespace=namespace
+        )
+        
+        # 删除service
+        core_api.delete_namespaced_service(
+            name=name,
+            namespace=namespace
+        )
+        
     except ApiException as e:
-        logger.error(f"Failed to delete Kubernetes resources: {str(e)}")
-        raise
+        if e.status != 404:  # 忽略404错误
+            logger.error(f"Failed to delete notebook resources: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to delete notebook resources: {str(e)}"
+            )
 
 def get_notebook_endpoint(name: str, namespace: str) -> str:
-    """获取Notebook访问地址"""
+    """获取Notebook访问地址
+    
+    Args:
+        name: Notebook名称
+        namespace: 项目namespace
+        
+    Returns:
+        访问地址
+    """
     try:
         service = core_api.read_namespaced_service(
             name=name,
             namespace=namespace
         )
         
-        # 根据实际环境构建访问地址
-        if service.spec.type == "LoadBalancer" and service.status.load_balancer.ingress:
-            host = service.status.load_balancer.ingress[0].ip or service.status.load_balancer.ingress[0].hostname
-            return f"http://{host}:8888"
-        else:
-            # 使用集群内部地址
-            return f"http://{service.metadata.name}.{service.metadata.namespace}.svc:8888"
-            
+        # 获取service的cluster ip
+        cluster_ip = service.spec.cluster_ip
+        
+        # 构建访问地址
+        return f"http://{cluster_ip}:8888"
+        
     except ApiException as e:
-        logger.error(f"Failed to get notebook endpoint: {str(e)}")
-        return ""
+        logger.error(f"Failed to get notebook endpoint: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get notebook endpoint: {str(e)}"
+        )
 
 def create_mljob_resource(name: str, namespace: str, job_id: str, spec: Dict[str, Any]):
     """创建MLJob资源"""
@@ -398,20 +394,4 @@ def delete_mljob_resource(name: str, namespace: str):
     except ApiException as e:
         if e.status != 404:  # 忽略不存在的资源
             logger.error(f"Failed to delete MLJob resource: {str(e)}")
-            raise
-
-def get_mljob_status(name: str, namespace: str) -> Dict[str, Any]:
-    """获取MLJob状态"""
-    try:
-        job = client.CustomObjectsApi().get_namespaced_custom_object(
-            group=settings.K8S_GROUP,
-            version=settings.K8S_VERSION,
-            namespace=namespace,
-            plural=settings.K8S_PLURAL,
-            name=name
-        )
-        return job.get("status", {})
-    except ApiException as e:
-        if e.status != 404:  # 忽略不存在的资源
-            logger.error(f"Failed to get MLJob status: {str(e)}")
-        raise 
+            raise 
