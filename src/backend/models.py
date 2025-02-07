@@ -70,4 +70,31 @@ class MLJob(db.Entity):
     
     # 关联
     project = Required(Project)
+    user = Required(User)
+
+class Notebook(db.Entity):
+    """Notebook模型"""
+    name = Required(str)
+    description = PonyOptional(str)
+    image = Required(str)  # notebook镜像
+    status = Required(str, default="stopped")  # stopped, running, error
+    message = PonyOptional(str)  # 状态信息
+    
+    # 资源配置
+    gpu_limit = Required(int, default=0)
+    cpu_limit = Required(float, default=1.0)
+    memory_limit = Required(str, default="1Gi")
+    
+    # 运行信息
+    service_name = PonyOptional(str)  # k8s service名称
+    endpoint = PonyOptional(str)  # 访问地址
+    
+    # 时间信息
+    created_at = Required(datetime, default=lambda: datetime.utcnow())
+    updated_at = Required(datetime, default=lambda: datetime.utcnow())
+    started_at = PonyOptional(datetime)
+    stopped_at = PonyOptional(datetime)
+    
+    # 关联
+    project = Required(Project)
     user = Required(User) 

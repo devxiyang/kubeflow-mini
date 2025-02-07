@@ -8,8 +8,8 @@ from pony.orm import db_session, select
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
-from .models import User, Project, MLJob
-from .schemas import UserCreate, ProjectCreate, MLJobCreate
+from .models import User, Project, MLJob, Notebook
+from .schemas import UserCreate, ProjectCreate, MLJobCreate, NotebookCreate, NotebookUpdate
 from .security import get_password_hash
 from .config import settings
 
@@ -390,4 +390,297 @@ def update_mljob_status(job_id: int, status: str) -> Optional[MLJob]:
             db_job.started_at = datetime.utcnow()
         elif status in ["completed", "failed"]:
             db_job.completed_at = datetime.utcnow()
-    return db_job 
+    return db_job
+
+# Notebook operations
+@db_session
+def create_notebook(notebook: NotebookCreate, user_id: int) -> Notebook:
+    """创建Notebook
+    
+    同时在数据库和Kubernetes中创建Notebook资源
+    """
+    try:
+        # 1. 检查项目是否存在
+        project = Project.get(id=notebook.project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+            
+        # 2. 创建数据库记录
+        db_notebook = Notebook(
+            name=notebook.name,
+            description=notebook.description,
+            image=notebook.image,
+            gpu_limit=notebook.gpu_limit,
+            cpu_limit=notebook.cpu_limit,
+            memory_limit=notebook.memory_limit,
+            project=notebook.project_id,
+            user=user_id
+        )
+        
+        # 提交数据库事务,确保记录创建成功
+        db.commit()
+        
+        try:
+            # 3. 创建Kubernetes资源
+            service_name = f"notebook-{db_notebook.id}"
+            k8s_spec = {
+                "image": notebook.image,
+                "resources": {
+                    "limits": {
+                        "nvidia.com/gpu": notebook.gpu_limit,
+                        "cpu": str(notebook.cpu_limit),
+                        "memory": notebook.memory_limit
+                    },
+                    "requests": {
+                        "cpu": str(notebook.cpu_limit / 2),
+                        "memory": _halve_memory(notebook.memory_limit)
+                    }
+                },
+                "project": project.name,
+                "owner": db_notebook.user.username
+            }
+            
+            # 创建Deployment和Service
+            create_notebook_resources(
+                name=service_name,
+                namespace=project.name,
+                spec=k8s_spec
+            )
+            
+            # 更新数据库记录
+            db_notebook.service_name = service_name
+            db_notebook.status = "running"
+            db_notebook.started_at = datetime.utcnow()
+            
+        except Exception as e:
+            logger.error(f"Failed to create Kubernetes resources for notebook {db_notebook.id}: {str(e)}")
+            db_notebook.status = "error"
+            db_notebook.message = f"Failed to create Kubernetes resources: {str(e)}"
+            
+        return db_notebook
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create notebook: {str(e)}"
+        )
+
+@db_session
+def update_notebook(notebook_id: int, notebook: NotebookUpdate) -> Notebook:
+    """更新Notebook
+    
+    同时更新数据库和Kubernetes中的资源
+    """
+    try:
+        # 1. 获取数据库记录
+        db_notebook = Notebook.get(id=notebook_id)
+        if not db_notebook:
+            raise HTTPException(status_code=404, detail="Notebook not found")
+            
+        # 2. 更新数据库记录
+        if notebook.description is not None:
+            db_notebook.description = notebook.description
+        if notebook.gpu_limit is not None:
+            db_notebook.gpu_limit = notebook.gpu_limit
+        if notebook.cpu_limit is not None:
+            db_notebook.cpu_limit = notebook.cpu_limit
+        if notebook.memory_limit is not None:
+            db_notebook.memory_limit = notebook.memory_limit
+            
+        db_notebook.updated_at = datetime.utcnow()
+        
+        # 3. 更新Kubernetes资源
+        if db_notebook.status == "running":
+            try:
+                k8s_spec = {
+                    "image": db_notebook.image,
+                    "resources": {
+                        "limits": {
+                            "nvidia.com/gpu": db_notebook.gpu_limit,
+                            "cpu": str(db_notebook.cpu_limit),
+                            "memory": db_notebook.memory_limit
+                        },
+                        "requests": {
+                            "cpu": str(db_notebook.cpu_limit / 2),
+                            "memory": _halve_memory(db_notebook.memory_limit)
+                        }
+                    },
+                    "project": db_notebook.project.name,
+                    "owner": db_notebook.user.username
+                }
+                
+                update_notebook_resources(
+                    name=db_notebook.service_name,
+                    namespace=db_notebook.project.name,
+                    spec=k8s_spec
+                )
+                
+            except Exception as e:
+                logger.error(f"Failed to update Kubernetes resources for notebook {notebook_id}: {str(e)}")
+                db_notebook.status = "error"
+                db_notebook.message = f"Failed to update Kubernetes resources: {str(e)}"
+                
+        return db_notebook
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update notebook: {str(e)}"
+        )
+
+@db_session
+def delete_notebook(notebook_id: int):
+    """删除Notebook
+    
+    同时删除数据库和Kubernetes中的资源
+    """
+    try:
+        # 1. 获取数据库记录
+        db_notebook = Notebook.get(id=notebook_id)
+        if not db_notebook:
+            raise HTTPException(status_code=404, detail="Notebook not found")
+            
+        # 2. 删除Kubernetes资源
+        if db_notebook.service_name:
+            try:
+                delete_notebook_resources(
+                    name=db_notebook.service_name,
+                    namespace=db_notebook.project.name
+                )
+            except Exception as e:
+                logger.error(f"Failed to delete Kubernetes resources for notebook {notebook_id}: {str(e)}")
+                
+        # 3. 删除数据库记录
+        db_notebook.delete()
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete notebook: {str(e)}"
+        )
+
+@db_session
+def start_notebook(notebook_id: int) -> Notebook:
+    """启动Notebook"""
+    try:
+        # 1. 获取数据库记录
+        db_notebook = Notebook.get(id=notebook_id)
+        if not db_notebook:
+            raise HTTPException(status_code=404, detail="Notebook not found")
+            
+        # 2. 检查状态
+        if db_notebook.status == "running":
+            return db_notebook
+            
+        # 3. 创建Kubernetes资源
+        service_name = f"notebook-{db_notebook.id}"
+        k8s_spec = {
+            "image": db_notebook.image,
+            "resources": {
+                "limits": {
+                    "nvidia.com/gpu": db_notebook.gpu_limit,
+                    "cpu": str(db_notebook.cpu_limit),
+                    "memory": db_notebook.memory_limit
+                },
+                "requests": {
+                    "cpu": str(db_notebook.cpu_limit / 2),
+                    "memory": _halve_memory(db_notebook.memory_limit)
+                }
+            },
+            "project": db_notebook.project.name,
+            "owner": db_notebook.user.username
+        }
+        
+        create_notebook_resources(
+            name=service_name,
+            namespace=db_notebook.project.name,
+            spec=k8s_spec
+        )
+        
+        # 4. 更新数据库记录
+        db_notebook.service_name = service_name
+        db_notebook.status = "running"
+        db_notebook.started_at = datetime.utcnow()
+        db_notebook.stopped_at = None
+        db_notebook.message = None
+        
+        return db_notebook
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to start notebook: {str(e)}"
+        )
+
+@db_session
+def stop_notebook(notebook_id: int) -> Notebook:
+    """停止Notebook"""
+    try:
+        # 1. 获取数据库记录
+        db_notebook = Notebook.get(id=notebook_id)
+        if not db_notebook:
+            raise HTTPException(status_code=404, detail="Notebook not found")
+            
+        # 2. 检查状态
+        if db_notebook.status == "stopped":
+            return db_notebook
+            
+        # 3. 删除Kubernetes资源
+        if db_notebook.service_name:
+            delete_notebook_resources(
+                name=db_notebook.service_name,
+                namespace=db_notebook.project.name
+            )
+            
+        # 4. 更新数据库记录
+        db_notebook.status = "stopped"
+        db_notebook.stopped_at = datetime.utcnow()
+        db_notebook.service_name = None
+        db_notebook.endpoint = None
+        db_notebook.message = None
+        
+        return db_notebook
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to stop notebook: {str(e)}"
+        )
+
+@db_session
+def get_notebook(notebook_id: int) -> Optional[Notebook]:
+    """获取Notebook"""
+    return Notebook.get(id=notebook_id)
+
+@db_session
+def get_notebooks(skip: int = 0, limit: int = 100) -> List[Notebook]:
+    """获取Notebook列表"""
+    return select(n for n in Notebook).offset(skip).limit(limit)[:]
+
+@db_session
+def get_project_notebooks(project_id: int, skip: int = 0, limit: int = 100) -> List[Notebook]:
+    """获取项目的Notebook列表"""
+    return select(n for n in Notebook if n.project.id == project_id).offset(skip).limit(limit)[:]
+
+@db_session
+def get_user_notebooks(user_id: int, skip: int = 0, limit: int = 100) -> List[Notebook]:
+    """获取用户的Notebook列表"""
+    return select(n for n in Notebook if n.user.id == user_id).offset(skip).limit(limit)[:]
+
+def _halve_memory(memory: str) -> str:
+    """将内存限制减半"""
+    try:
+        bytes = _convert_memory_to_bytes(memory)
+        return _convert_bytes_to_memory(bytes // 2)
+    except:
+        return memory 

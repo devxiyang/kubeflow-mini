@@ -11,13 +11,17 @@ import logging
 from .config import settings
 from .models import init_database
 from .schemas import (
-    User, UserCreate, Project, ProjectCreate, MLJob, MLJobCreate, Token
+    User, UserCreate, Project, ProjectCreate, MLJob, MLJobCreate,
+    Notebook, NotebookCreate, NotebookUpdate, Token
 )
 from .crud import (
     create_user, get_user_by_username, get_users,
     create_project, get_project, get_projects, get_user_projects,
     create_mljob, get_mljob, get_mljobs, get_project_mljobs, get_user_mljobs,
-    update_mljob_status
+    update_mljob_status,
+    create_notebook, get_notebook, get_notebooks, get_project_notebooks,
+    get_user_notebooks, update_notebook, delete_notebook,
+    start_notebook, stop_notebook
 )
 from .security import (
     authenticate_user, create_access_token,
@@ -253,4 +257,123 @@ async def update_job_status(
     if mljob.user.id != current_user.id:
         raise HTTPException(status_code=403, detail="Not enough permissions")
     update_mljob_status(job_id=job_id, status=status)
+    return {"ok": True}
+
+# Notebook路由
+@app.post("/notebooks/", response_model=Notebook)
+async def create_new_notebook(
+    notebook: NotebookCreate,
+    current_user: User = Depends(get_current_active_user)
+):
+    """创建Notebook"""
+    # 检查项目是否存在
+    project = get_project(project_id=notebook.project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    # 检查用户是否有权限
+    if project.owner.id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+    
+    return create_notebook(notebook=notebook, user_id=current_user.id)
+
+@app.get("/notebooks/", response_model=List[Notebook])
+async def read_notebooks(
+    skip: int = 0,
+    limit: int = 100,
+    current_user: User = Depends(get_current_active_user)
+):
+    """获取Notebook列表"""
+    notebooks = get_notebooks(skip=skip, limit=limit)
+    return notebooks
+
+@app.get("/notebooks/me/", response_model=List[Notebook])
+async def read_user_notebooks(
+    skip: int = 0,
+    limit: int = 100,
+    current_user: User = Depends(get_current_active_user)
+):
+    """获取当前用户的Notebook列表"""
+    notebooks = get_user_notebooks(user_id=current_user.id, skip=skip, limit=limit)
+    return notebooks
+
+@app.get("/projects/{project_id}/notebooks/", response_model=List[Notebook])
+async def read_project_notebooks(
+    project_id: int,
+    skip: int = 0,
+    limit: int = 100,
+    current_user: User = Depends(get_current_active_user)
+):
+    """获取项目的Notebook列表"""
+    project = get_project(project_id=project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    notebooks = get_project_notebooks(project_id=project_id, skip=skip, limit=limit)
+    return notebooks
+
+@app.get("/notebooks/{notebook_id}", response_model=Notebook)
+async def read_notebook(
+    notebook_id: int,
+    current_user: User = Depends(get_current_active_user)
+):
+    """获取Notebook详情"""
+    notebook = get_notebook(notebook_id=notebook_id)
+    if notebook is None:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    return notebook
+
+@app.put("/notebooks/{notebook_id}", response_model=Notebook)
+async def update_notebook_config(
+    notebook_id: int,
+    notebook: NotebookUpdate,
+    current_user: User = Depends(get_current_active_user)
+):
+    """更新Notebook配置"""
+    db_notebook = get_notebook(notebook_id=notebook_id)
+    if db_notebook is None:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    if db_notebook.user.id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+    return update_notebook(notebook_id=notebook_id, notebook=notebook)
+
+@app.delete("/notebooks/{notebook_id}")
+async def delete_notebook_instance(
+    notebook_id: int,
+    current_user: User = Depends(get_current_active_user)
+):
+    """删除Notebook"""
+    db_notebook = get_notebook(notebook_id=notebook_id)
+    if db_notebook is None:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    if db_notebook.user.id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+    delete_notebook(notebook_id=notebook_id)
+    return {"ok": True}
+
+@app.post("/notebooks/{notebook_id}/start")
+async def start_notebook_instance(
+    notebook_id: int,
+    current_user: User = Depends(get_current_active_user)
+):
+    """启动Notebook"""
+    db_notebook = get_notebook(notebook_id=notebook_id)
+    if db_notebook is None:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    if db_notebook.user.id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+    notebook = start_notebook(notebook_id=notebook_id)
+    return {"ok": True, "endpoint": notebook.endpoint}
+
+@app.post("/notebooks/{notebook_id}/stop")
+async def stop_notebook_instance(
+    notebook_id: int,
+    current_user: User = Depends(get_current_active_user)
+):
+    """停止Notebook"""
+    db_notebook = get_notebook(notebook_id=notebook_id)
+    if db_notebook is None:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    if db_notebook.user.id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+    stop_notebook(notebook_id=notebook_id)
     return {"ok": True} 
