@@ -8,15 +8,17 @@
 
 import logging
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List
 from kubernetes.client.rest import ApiException
 import kopf
 
 from .config import settings
 from .utils import (
     create_training_job, delete_training_job, get_training_job_status,
-    validate_resource_requests, check_project_quota
+    validate_resource_requests, check_project_quota, exponential_backoff,
+    get_k8s_api
 )
+from .models import MLJobStatus, MLJobCondition
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,7 @@ def validate_mljob_spec(spec: Dict[str, Any]) -> bool:
         training = spec.get("training", {})
         if not all(field in training for field in ["api_version", "kind", "spec"]):
             return False
+            
 
         # 验证资源请求
         if "spec" in training:
@@ -51,7 +54,8 @@ def validate_mljob_spec(spec: Dict[str, Any]) -> bool:
                 return False
 
         return True
-    except Exception:
+    except Exception as e:
+        logger.error(f"Failed to validate MLJob spec: {str(e)}")
         return False
 
 def validate_project_quota(namespace: str, spec: Dict[str, Any]) -> bool:
@@ -79,15 +83,29 @@ def create_training_job_resource(name: str, namespace: str, spec: Dict[str, Any]
         kopf.PermanentError: 创建失败
     """
     try:
-        return create_training_job(name, namespace, spec)
+        # 添加标准标签
+        labels = {
+            **settings.LABELS,
+            "job-id": spec.get("job_id", ""),
+            "project": spec.get("project", ""),
+            "owner": spec.get("owner", "")
+        }
+        if spec.get("labels"):
+            labels.update(spec["labels"])
+            
+        return create_training_job(name, namespace, spec, labels)
     except ApiException as e:
         if e.status == 409:  # Conflict
-            raise kopf.TemporaryError("Resource conflict, retrying...", delay=10)
+            raise kopf.TemporaryError(
+                "Resource conflict, retrying...",
+                delay=exponential_backoff(1)
+            )
         raise kopf.PermanentError(f"Failed to create training job: {e}")
     except Exception as e:
         raise kopf.PermanentError(f"Failed to create training job: {e}")
 
-def update_training_job_resource(name: str, namespace: str, old_spec: Dict[str, Any], new_spec: Dict[str, Any]):
+def update_training_job_resource(name: str, namespace: str, 
+                               old_spec: Dict[str, Any], new_spec: Dict[str, Any]):
     """更新training-operator Job资源
     
     通过删除旧资源并创建新资源的方式实现更新
@@ -103,11 +121,26 @@ def update_training_job_resource(name: str, namespace: str, old_spec: Dict[str, 
         kopf.PermanentError: 更新失败
     """
     try:
+        # 删除旧资源
         delete_training_job(name, namespace, old_spec)
-        return create_training_job(name, namespace, new_spec)
+        
+        # 创建新资源
+        labels = {
+            **settings.LABELS,
+            "job-id": new_spec.get("job_id", ""),
+            "project": new_spec.get("project", ""),
+            "owner": new_spec.get("owner", "")
+        }
+        if new_spec.get("labels"):
+            labels.update(new_spec["labels"])
+            
+        return create_training_job(name, namespace, new_spec, labels)
     except ApiException as e:
         if e.status == 409:  # Conflict
-            raise kopf.TemporaryError("Resource conflict, retrying...", delay=10)
+            raise kopf.TemporaryError(
+                "Resource conflict, retrying...",
+                delay=exponential_backoff(1)
+            )
         raise kopf.PermanentError(f"Failed to update training job: {e}")
     except Exception as e:
         raise kopf.PermanentError(f"Failed to update training job: {e}")
@@ -133,7 +166,7 @@ def delete_training_job_resource(name: str, namespace: str, spec: Dict[str, Any]
     except Exception as e:
         raise kopf.PermanentError(f"Failed to delete training job: {e}")
 
-def get_training_job_status(name: str, namespace: str, spec: Dict[str, Any]):
+def get_training_job_status(name: str, namespace: str, spec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """获取training-operator Job的运行状态
     
     Args:
@@ -152,14 +185,16 @@ def get_training_job_status(name: str, namespace: str, spec: Dict[str, Any]):
     except ApiException as e:
         if e.status == 404:  # Not found
             logger.warning(f"Training job for {namespace}/{name} not found")
-            return {
-                "phase": settings.JOB_PHASES["FAILED"],
-                "message": "Training job not found",
-                "reason": "NotFound"
-            }
-        raise kopf.TemporaryError(f"Failed to get training job status: {e}", delay=30)
+            return None
+        raise kopf.TemporaryError(
+            f"Failed to get training job status: {e}",
+            delay=exponential_backoff(1)
+        )
     except Exception as e:
-        raise kopf.TemporaryError(f"Failed to get training job status: {e}", delay=30)
+        raise kopf.TemporaryError(
+            f"Failed to get training job status: {e}",
+            delay=exponential_backoff(1)
+        )
 
 def should_update_training_job(old_spec: Dict[str, Any], new_spec: Dict[str, Any]) -> bool:
     """检查是否需要更新training-operator Job
@@ -183,6 +218,10 @@ def should_update_training_job(old_spec: Dict[str, Any], new_spec: Dict[str, Any
             if old_training.get(field) != new_training.get(field):
                 return True
                 
+        # 检查标签变化
+        if old_spec.get("labels") != new_spec.get("labels"):
+            return True
+                
         return False
     except Exception:
         # 如果出现异常,为安全起见返回True
@@ -203,18 +242,53 @@ def create_mljob_status(phase: str, message: str, **kwargs) -> Dict[str, Any]:
     Returns:
         Dict: 完整的状态信息
     """
-    status = {
-        "phase": phase,
-        "message": message,
-        "observed_generation": kwargs.get("generation", 1)
-    }
-    
-    if kwargs.get("start_time"):
-        status["start_time"] = datetime.utcnow().isoformat() + "Z"
-    if kwargs.get("completion_time"):
-        status["completion_time"] = datetime.utcnow().isoformat() + "Z"
+    try:
+        # 创建基本状态
+        status = MLJobStatus(
+            phase=phase,
+            message=message,
+            reason=kwargs.get("reason"),
+            training_status=kwargs.get("training_status"),
+            observed_generation=kwargs.get("generation", 1),
+            reconcile_errors=kwargs.get("reconcile_errors", 0)
+        )
         
-    if "training_status" in kwargs:
-        status["training_status"] = kwargs["training_status"]
+        # 添加时间戳
+        if kwargs.get("start_time"):
+            status.start_time = datetime.utcnow().isoformat() + "Z"
+        if kwargs.get("completion_time"):
+            status.completion_time = datetime.utcnow().isoformat() + "Z"
+            
+        # 更新状态条件
+        new_condition = MLJobCondition(
+            type=phase,
+            status="True",
+            reason=kwargs.get("reason"),
+            message=message,
+            last_transition_time=datetime.utcnow().isoformat() + "Z",
+            last_update_time=datetime.utcnow().isoformat() + "Z"
+        )
         
-    return status 
+        # 保留最近的10个条件
+        status.conditions = [new_condition] + status.conditions[:9]
+        
+        return status.dict(exclude_none=True)
+    except Exception as e:
+        logger.error(f"Failed to create MLJob status: {str(e)}")
+        # 返回最小状态
+        return {
+            "phase": phase,
+            "message": message,
+            "observed_generation": kwargs.get("generation", 1)
+        }
+
+def get_job_age(meta: Dict[str, Any]) -> Optional[int]:
+    """获取任务年龄(天)"""
+    try:
+        creation_time = meta.get("creationTimestamp")
+        if creation_time:
+            age = datetime.utcnow() - datetime.fromisoformat(creation_time.rstrip("Z"))
+            return age.days
+        return None
+    except Exception:
+        return None 

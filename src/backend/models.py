@@ -13,6 +13,7 @@ class User(db.Entity):
     full_name = Required(str)
     hashed_password = Required(str)
     is_active = Required(bool, default=True)
+    role = Required(str, default="user")  # user, admin
     created_at = Required(datetime, default=lambda: datetime.utcnow())
     updated_at = Required(datetime, default=lambda: datetime.utcnow())
     
@@ -24,6 +25,7 @@ class Project(db.Entity):
     """项目模型"""
     name = Required(str, unique=True)
     description = PonyOptional(str)
+    status = Required(str, default="active")  # active, archived, deleted
     created_at = Required(datetime, default=lambda: datetime.utcnow())
     updated_at = Required(datetime, default=lambda: datetime.utcnow())
     
@@ -43,6 +45,8 @@ class MLJob(db.Entity):
     name = Required(str)  # k8s资源名称
     namespace = Required(str, default="default")
     description = PonyOptional(str)
+    priority = Required(int, default=0)  # 任务优先级 0-100
+    labels = PonyOptional(str)  # 标签(JSON)
     
     # Training配置
     training = Required(str)  # training-operator配置(JSON)
@@ -51,6 +55,12 @@ class MLJob(db.Entity):
     status = Required(str, default="pending")  # pending, running, succeeded, failed, deleted
     message = PonyOptional(str)  # 状态信息
     training_status = PonyOptional(str)  # training operator返回的状态(JSON)
+    sync_errors = Required(int, default=0)  # 同步错误计数
+    
+    # 资源使用情况
+    gpu_usage = PonyOptional(int)  # GPU使用量
+    cpu_usage = PonyOptional(float)  # CPU使用量
+    memory_usage = PonyOptional(str)  # 内存使用量
     
     # 时间信息
     created_at = Required(datetime, default=lambda: datetime.utcnow())

@@ -3,6 +3,19 @@
 from typing import Optional
 from pydantic_settings import BaseSettings
 
+class RetrySettings(BaseSettings):
+    """重试配置"""
+    max_attempts: int = 3
+    initial_delay: int = 1
+    max_delay: int = 300
+    exponential_base: float = 2.0
+
+class ResourceSettings(BaseSettings):
+    """资源配置"""
+    cleanup_interval: int = 3600  # 资源清理间隔(秒)
+    max_job_age: int = 30  # 已完成任务保留天数
+    batch_size: int = 100  # 批处理大小
+
 class Settings(BaseSettings):
     """应用配置"""
     # API配置
@@ -29,6 +42,17 @@ class Settings(BaseSettings):
     K8S_VERSION: str = "v1"
     K8S_PLURAL: str = "mljobs"
     K8S_SYNC_INTERVAL: int = 30  # 状态同步间隔(秒)
+    
+    # 重试配置
+    RETRY: RetrySettings = RetrySettings()
+    
+    # 资源管理配置
+    RESOURCE: ResourceSettings = ResourceSettings()
+    
+    # 状态同步配置
+    SYNC_BATCH_SIZE: int = 50  # 每次同步的任务数量
+    SYNC_ERROR_THRESHOLD: int = 3  # 错误阈值，超过后标记为失败
+    SYNC_TIMEOUT: int = 60  # 同步超时时间(秒)
     
     class Config:
         case_sensitive = True
